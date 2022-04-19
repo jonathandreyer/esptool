@@ -1,6 +1,6 @@
 {
   "name": "tool-esptoolpy",
-  "version": "1.30200.211109",
+  "version": "1.30300.220322",
   "description": "Espressif ESP8266 and ESP32 serial bootloader utility",
   "keywords": [
     "tools",
