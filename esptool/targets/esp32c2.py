@@ -1,13 +1,15 @@
-# SPDX-FileCopyrightText: 2014-2022 Fredrik Ahlberg, Angus Gratton,
+# SPDX-FileCopyrightText: 2014-2024 Fredrik Ahlberg, Angus Gratton,
 # Espressif Systems (Shanghai) CO LTD, other contributors as noted.
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import struct
 import time
+from typing import Dict
 
 from .esp32c3 import ESP32C3ROM
 from ..loader import ESPLoader
+from ..util import FatalError
 
 
 class ESP32C2ROM(ESP32C3ROM):
@@ -19,8 +21,8 @@ class ESP32C2ROM(ESP32C3ROM):
     DROM_MAP_START = 0x3C000000
     DROM_MAP_END = 0x3C400000
 
-    # Magic value for ESP32C2 ECO0 and ECO1 respectively
-    CHIP_DETECT_MAGIC_VALUE = [0x6F51306F, 0x7C41A06F]
+    # Magic value for ESP32C2 ECO0 , ECO1 and ECO4 respectively
+    CHIP_DETECT_MAGIC_VALUE = [0x6F51306F, 0x7C41A06F, 0x0C21E06F]
 
     EFUSE_BASE = 0x60008800
     EFUSE_BLOCK2_ADDR = EFUSE_BASE + 0x040
@@ -61,6 +63,16 @@ class ESP32C2ROM(ESP32C3ROM):
         [0x4037C000, 0x403C0000, "IRAM"],
     ]
 
+    RTCCNTL_BASE_REG = 0x60008000
+    RTC_CNTL_WDTCONFIG0_REG = RTCCNTL_BASE_REG + 0x0084
+    RTC_CNTL_WDTCONFIG1_REG = RTCCNTL_BASE_REG + 0x0088
+    RTC_CNTL_WDTWPROTECT_REG = RTCCNTL_BASE_REG + 0x009C
+    RTC_CNTL_WDT_WKEY = 0x50D83AA1
+
+    UF2_FAMILY_ID = 0x2B88D29C
+
+    KEY_PURPOSES: Dict[int, str] = {}
+
     def get_pkg_version(self):
         num_word = 1
         return (self.read_reg(self.EFUSE_BLOCK2_ADDR + (4 * num_word)) >> 22) & 0x07
@@ -81,6 +93,16 @@ class ESP32C2ROM(ESP32C3ROM):
     def get_major_chip_version(self):
         num_word = 1
         return (self.read_reg(self.EFUSE_BLOCK2_ADDR + (4 * num_word)) >> 20) & 0x3
+
+    def get_flash_cap(self):
+        # ESP32-C2 doesn't have eFuse field FLASH_CAP.
+        # Can't get info about the flash chip.
+        return 0
+
+    def get_flash_vendor(self):
+        # ESP32-C2 doesn't have eFuse field FLASH_VENDOR.
+        # Can't get info about the flash chip.
+        return ""
 
     def get_crystal_freq(self):
         # The crystal detection algorithm of ESP32/ESP8266 works for ESP32-C2 as well.
@@ -114,6 +136,9 @@ class ESP32C2ROM(ESP32C3ROM):
             self.stub_is_disabled = True
             self.IS_STUB = False
 
+    def hard_reset(self):
+        ESPLoader.hard_reset(self)
+
     """ Try to read (encryption key) and check if it is valid """
 
     def is_flash_encryption_key_valid(self):
@@ -133,7 +158,7 @@ class ESP32C2ROM(ESP32C3ROM):
             # When chip has not generated AES/encryption key in BLOCK3,
             # the contents will be readable and 0.
             # If the flash encryption is enabled it is expected to have a valid
-            # non-zero key. We break out on first occurance of non-zero value
+            # non-zero key. We break out on first occurrence of non-zero value
             key_word = [0] * 7 if key_len_256 else [0] * 3
             for i in range(len(key_word)):
                 key_word[i] = self.read_reg(self.EFUSE_BLOCK_KEY0_REG + i * 4)
@@ -141,6 +166,10 @@ class ESP32C2ROM(ESP32C3ROM):
                 if key_word[i] != 0:
                     return True
             return False
+
+    def check_spi_connection(self, spi_connection):
+        if not set(spi_connection).issubset(set(range(0, 21))):
+            raise FatalError("SPI Pin numbers must be in the range 0-20.")
 
 
 class ESP32C2StubLoader(ESP32C2ROM):

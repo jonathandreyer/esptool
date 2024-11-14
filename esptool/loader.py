@@ -13,6 +13,8 @@ import string
 import struct
 import sys
 import time
+from typing import Optional
+
 
 from .config import load_config_file
 from .reset import (
@@ -59,7 +61,7 @@ except ImportError:
     print(
         "The installed version (%s) of pyserial appears to be too old for esptool.py "
         "(Python interpreter %s). Check the README for installation instructions."
-        % (sys.VERSION, sys.executable)
+        % (serial.VERSION, sys.executable)
     )
     raise
 except Exception:
@@ -96,14 +98,8 @@ DEFAULT_SERIAL_WRITE_TIMEOUT = cfg.getfloat("serial_write_timeout", 10)
 DEFAULT_CONNECT_ATTEMPTS = cfg.getint("connect_attempts", 7)
 # Number of times to try writing a data block
 WRITE_BLOCK_ATTEMPTS = cfg.getint("write_block_attempts", 3)
-
-STUBS_DIR = os.path.join(os.path.dirname(__file__), "targets", "stub_flasher")
-
-
-def get_stub_json_path(chip_name):
-    chip_name = strip_chip_name(chip_name)
-    chip_name = chip_name.replace("esp", "")
-    return os.path.join(STUBS_DIR, f"stub_flasher_{chip_name}.json")
+# Number of times to try opening the serial port
+DEFAULT_OPEN_PORT_ATTEMPTS = cfg.getint("open_port_attempts", 1)
 
 
 def timeout_per_mb(seconds_per_mb, size_bytes):
@@ -155,8 +151,12 @@ def esp32s3_or_newer_function_only(func):
 
 
 class StubFlasher:
-    def __init__(self, json_path):
-        with open(json_path) as json_file:
+    STUB_DIR = os.path.join(os.path.dirname(__file__), "targets", "stub_flasher")
+    # directories will be searched in the order of STUB_SUBDIRS
+    STUB_SUBDIRS = ["1", "2"]
+
+    def __init__(self, chip_name):
+        with open(self.get_json_path(chip_name)) as json_file:
             stub = json.load(json_file)
 
         self.text = base64.b64decode(stub["text"])
@@ -170,6 +170,28 @@ class StubFlasher:
             self.data = None
             self.data_start = None
 
+        self.bss_start = stub.get("bss_start")
+
+    def get_json_path(self, chip_name):
+        chip_name = strip_chip_name(chip_name)
+        for i, subdir in enumerate(self.STUB_SUBDIRS):
+            json_path = os.path.join(self.STUB_DIR, subdir, f"{chip_name}.json")
+            if os.path.exists(json_path):
+                if i:
+                    print(
+                        f"Warning: Stub version {self.STUB_SUBDIRS[0]} doesn't exist, using {subdir} instead"
+                    )
+
+                return json_path
+        else:
+            raise FileNotFoundError(f"Stub flasher JSON file for {chip_name} not found")
+
+    @classmethod
+    def set_preferred_stub_subdir(cls, subdir):
+        if subdir in cls.STUB_SUBDIRS:
+            cls.STUB_SUBDIRS.remove(subdir)
+            cls.STUB_SUBDIRS.insert(0, subdir)
+
 
 class ESPLoader(object):
     """Base class providing access to ESP ROM & software stub bootloaders.
@@ -177,14 +199,15 @@ class ESPLoader(object):
 
     Don't instantiate this base class directly, either instantiate a subclass or
     call cmds.detect_chip() which will interrogate the chip and return the
-    appropriate subclass instance.
+    appropriate subclass instance. You can also use a context manager as
+    "with detect_chip() as esp:" to ensure the serial port is closed when done.
 
     """
 
     CHIP_NAME = "Espressif device"
     IS_STUB = False
-
-    FPGA_SLOW_BOOT = False
+    STUB_CLASS: Optional[object] = None
+    BOOTLOADER_IMAGE: Optional[object] = None
 
     DEFAULT_PORT = "/dev/ttyUSB0"
 
@@ -201,7 +224,7 @@ class ESPLoader(object):
     ESP_WRITE_REG = 0x09
     ESP_READ_REG = 0x0A
 
-    # Some comands supported by ESP32 and later chips ROM bootloader (or -8266 w/ stub)
+    # Some commands supported by ESP32 and later chips ROM bootloader (or -8266 w/ stub)
     ESP_SPI_SET_PARAMS = 0x0B
     ESP_SPI_ATTACH = 0x0D
     ESP_READ_FLASH_SLOW = 0x0E  # ROM only, much slower than the stub flash read
@@ -245,6 +268,9 @@ class ESPLoader(object):
 
     UART_DATE_REG_ADDR = 0x60000078
 
+    # Whether the SPI peripheral sends from MSB of 32-bit register, or the MSB of valid LSB bits.
+    SPI_ADDR_REG_MSB = True
+
     # This ROM address has a different value on each chip model
     CHIP_DETECT_MAGIC_REG_ADDR = 0x40001000
 
@@ -273,11 +299,15 @@ class ESPLoader(object):
     # Chip IDs that are no longer supported by esptool
     UNSUPPORTED_CHIPS = {6: "ESP32-S3(beta 3)"}
 
+    # Number of attempts to write flash data
+    WRITE_FLASH_ATTEMPTS = 2
+
     def __init__(self, port=DEFAULT_PORT, baud=ESP_ROM_BAUD, trace_enabled=False):
         """Base constructor for ESPLoader bootloader interaction
 
         Don't call this constructor, either instantiate a specific
-        ROM class directly, or use cmds.detect_chip().
+        ROM class directly, or use cmds.detect_chip(). You can use the with
+        statement to ensure the serial port is closed when done.
 
         This base class has all of the instance methods for bootloader
         functionality supported across various chips & stub
@@ -300,9 +330,47 @@ class ESPLoader(object):
 
         if isinstance(port, str):
             try:
-                self._port = serial.serial_for_url(port)
-            except serial.serialutil.SerialException:
-                raise FatalError(f"Could not open {port}, the port doesn't exist")
+                self._port = serial.serial_for_url(
+                    port, exclusive=True, do_not_open=True
+                )
+                if sys.platform == "win32":
+                    # When opening a port on Windows,
+                    # the RTS/DTR (active low) lines
+                    # need to be set to False (pulled high)
+                    # to avoid unwanted chip reset
+                    self._port.rts = False
+                    self._port.dtr = False
+                self._port.open()
+            except serial.serialutil.SerialException as e:
+                port_issues = [
+                    [  # does not exist error
+                        re.compile(r"Errno 2|FileNotFoundError", re.IGNORECASE),
+                        "Check if the port is correct and ESP connected",
+                    ],
+                    [  # busy port error
+                        re.compile(r"Access is denied", re.IGNORECASE),
+                        "Check if the port is not used by another task",
+                    ],
+                ]
+                if sys.platform.startswith("linux"):
+                    port_issues.append(
+                        [  # permission denied error
+                            re.compile(r"Permission denied", re.IGNORECASE),
+                            ("Try to add user into dialout or uucp group."),
+                        ],
+                    )
+
+                hint_msg = ""
+                for port_issue in port_issues:
+                    if port_issue[0].search(str(e)):
+                        hint_msg = f"\nHint: {port_issue[1]}\n"
+                        break
+
+                raise FatalError(
+                    f"Could not open {port}, the port is busy or doesn't exist."
+                    f"\n({e})\n"
+                    f"{hint_msg}"
+                )
         else:
             self._port = port
         self._slip_reader = slip_reader(self._port, self.trace)
@@ -319,6 +387,12 @@ class ESPLoader(object):
             # no write timeout for RFC2217 ports
             # need to set the property back to None or it will continue to fail
             self._port.write_timeout = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._port.close()
 
     @property
     def serial_port(self):
@@ -468,7 +542,7 @@ class ESPLoader(object):
 
         # ROM bootloaders send some non-zero "val" response. The flasher stub sends 0.
         # If we receive 0 then it probably indicates that the chip wasn't or couldn't be
-        # reseted properly and esptool is talking to the flasher stub.
+        # reset properly and esptool is talking to the flasher stub.
         self.sync_stub_detected = val == 0
 
         for _ in range(7):
@@ -597,7 +671,7 @@ class ESPLoader(object):
 
         # This FPGA delay is for Espressif internal use
         if (
-            self.FPGA_SLOW_BOOT
+            self.CHIP_NAME == "ESP32"
             and os.environ.get("ESPTOOL_ENV_FPGA", "").strip() == "1"
         ):
             delay = extra_delay = 7
@@ -634,6 +708,15 @@ class ESPLoader(object):
                 "Connection may fail if the chip is not in bootloader "
                 "or flasher stub mode.",
             )
+
+        if self._port.name.startswith("socket:"):
+            mode = "no_reset"  # not possible to toggle DTR/RTS over a TCP socket
+            print(
+                "Note: It's not possible to reset the chip over a TCP socket. "
+                "Automatic resetting to bootloader has been disabled, "
+                "reset the chip manually."
+            )
+
         print("Connecting...", end="")
         sys.stdout.flush()
         last_error = None
@@ -651,8 +734,17 @@ class ESPLoader(object):
             print("")  # end 'Connecting...' line
 
         if last_error is not None:
+            additional_msg = ""
+            if self.CHIP_NAME == "ESP32-C2" and self._port.baudrate < 115200:
+                additional_msg = (
+                    "\nNote: Please set a higher baud rate (--baud)"
+                    " if ESP32-C2 doesn't connect"
+                    " (at least 115200 Bd is recommended)."
+                )
+
             raise FatalError(
                 "Failed to connect to {}: {}"
+                f"{additional_msg}"
                 "\nFor troubleshooting steps visit: "
                 "https://docs.espressif.com/projects/esptool/en/latest/troubleshooting.html".format(  # noqa E501
                     self.CHIP_NAME, last_error
@@ -748,20 +840,23 @@ class ESPLoader(object):
         """Start downloading an application image to RAM"""
         # check we're not going to overwrite a running stub with this data
         if self.IS_STUB:
-            stub = StubFlasher(get_stub_json_path(self.CHIP_NAME))
+            stub = StubFlasher(self.CHIP_NAME)
             load_start = offset
             load_end = offset + size
-            for start, end in [
-                (stub.data_start, stub.data_start + len(stub.data)),
-                (stub.text_start, stub.text_start + len(stub.text)),
+            for stub_start, stub_end in [
+                (
+                    stub.bss_start or stub.data_start,
+                    stub.data_start + len(stub.data),
+                ),  # DRAM = bss+data
+                (stub.text_start, stub.text_start + len(stub.text)),  # IRAM
             ]:
-                if load_start < end and load_end > start:
+                if load_start < stub_end and load_end > stub_start:
                     raise FatalError(
                         "Software loader is resident at 0x%08x-0x%08x. "
                         "Can't load binary at overlapping address range 0x%08x-0x%08x. "
                         "Either change binary loading address, or use the --no-stub "
                         "option to disable the software loader."
-                        % (start, end, load_start, load_end)
+                        % (stub_start, stub_end, load_start, load_end)
                     )
 
         return self.check_command(
@@ -796,7 +891,7 @@ class ESPLoader(object):
                 raise
             pass
 
-    def flash_begin(self, size, offset, begin_rom_encrypted=False):
+    def flash_begin(self, size, offset, begin_rom_encrypted=False, logging=True):
         """
         Start downloading to Flash (performs an erase)
 
@@ -821,7 +916,7 @@ class ESPLoader(object):
         self.check_command(
             "enter Flash download mode", self.ESP_FLASH_BEGIN, params, timeout=timeout
         )
-        if size != 0 and not self.IS_STUB:
+        if size != 0 and not self.IS_STUB and logging:
             print("Took %.2fs to erase flash block" % (time.time() - t))
         return num_blocks
 
@@ -953,7 +1048,7 @@ class ESPLoader(object):
 
     def run_stub(self, stub=None):
         if stub is None:
-            stub = StubFlasher(get_stub_json_path(self.CHIP_NAME))
+            stub = StubFlasher(self.CHIP_NAME)
 
         if self.sync_stub_detected:
             print("Stub is already running. No upload is necessary.")
@@ -1101,10 +1196,6 @@ class ESPLoader(object):
 
     @stub_function_only
     def erase_region(self, offset, size):
-        if offset % self.FLASH_SECTOR_SIZE != 0:
-            raise FatalError("Offset to erase from must be a multiple of 4096")
-        if size % self.FLASH_SECTOR_SIZE != 0:
-            raise FatalError("Size of data to erase must be a multiple of 4096")
         timeout = timeout_per_mb(ERASE_REGION_TIMEOUT_PER_MB, size)
         self.check_command(
             "erase region",
@@ -1309,7 +1400,9 @@ class ESPLoader(object):
         self.write_reg(
             SPI_USR2_REG, (7 << SPI_USR2_COMMAND_LEN_SHIFT) | spiflash_command
         )
-        if addr and addr_len > 0:
+        if addr_len > 0:
+            if self.SPI_ADDR_REG_MSB:
+                addr = addr << (32 - addr_len)
             self.write_reg(SPI_ADDR_REG, addr)
         if data_bits == 0:
             self.write_reg(SPI_W0_REG, 0)  # clear data register before we read it
@@ -1414,7 +1507,12 @@ class ESPLoader(object):
         #   See the self.XTAL_CLK_DIVIDER parameter for this factor.
         uart_div = self.read_reg(self.UART_CLKDIV_REG) & self.UART_CLKDIV_MASK
         est_xtal = (self._port.baudrate * uart_div) / 1e6 / self.XTAL_CLK_DIVIDER
-        norm_xtal = 40 if est_xtal > 33 else 26
+        if est_xtal > 45:
+            norm_xtal = 48
+        elif est_xtal > 33:
+            norm_xtal = 40
+        else:
+            norm_xtal = 26
         if abs(norm_xtal - est_xtal) > 1:
             print(
                 "WARNING: Detected crystal freq %.2fMHz is quite different to "
@@ -1423,9 +1521,13 @@ class ESPLoader(object):
             )
         return norm_xtal
 
-    def hard_reset(self):
+    def hard_reset(self, uses_usb=False):
         print("Hard resetting via RTS pin...")
-        HardReset(self._port)()
+        cfg_custom_hard_reset_sequence = cfg.get("custom_hard_reset_sequence")
+        if cfg_custom_hard_reset_sequence is not None:
+            CustomReset(self._port, cfg_custom_hard_reset_sequence)()
+        else:
+            HardReset(self._port, uses_usb)()
 
     def soft_reset(self, stay_in_bootloader):
         if not self.IS_STUB:
@@ -1596,12 +1698,14 @@ class HexFormatter(object):
             while len(s) > 0:
                 line = s[:16]
                 ascii_line = "".join(
-                    c
-                    if (
-                        c == " "
-                        or (c in string.printable and c not in string.whitespace)
+                    (
+                        c
+                        if (
+                            c == " "
+                            or (c in string.printable and c not in string.whitespace)
+                        )
+                        else "."
                     )
-                    else "."
                     for c in line.decode("ascii", "replace")
                 )
                 s = s[16:]

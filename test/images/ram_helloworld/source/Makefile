@@ -1,7 +1,7 @@
 # Makefile to compile the helloworld app for esptool tests
 
 # Prefix for each cross compiler (can include a directory path)
-# These can be overriden via environment variables or on the make command line
+# These can be overridden via environment variables or on the make command line
 CROSS_8266 ?= xtensa-lx106-elf-
 CROSS_32 ?= xtensa-esp32-elf-
 CROSS_32S2 ?= xtensa-esp32s2-elf-
@@ -26,13 +26,16 @@ APP_ELF_32S3 = $(BUILD_DIR)/$(APP)-esp32s3.elf
 APP_ELF_32C3 = $(BUILD_DIR)/$(APP)-esp32c3.elf
 APP_ELF_32C2 = $(BUILD_DIR)/$(APP)-esp32c2.elf
 APP_ELF_32C6 = $(BUILD_DIR)/$(APP)-esp32c6.elf
+APP_ELF_32C61 = $(BUILD_DIR)/$(APP)-esp32c61.elf
 APP_ELF_32H2 = $(BUILD_DIR)/$(APP)-esp32h2.elf
+APP_ELF_32P4 = $(BUILD_DIR)/$(APP)-esp32p4.elf
+APP_ELF_32C5 = $(BUILD_DIR)/$(APP)-esp32c5.elf
 
 .PHONY: all esp32 clean
 
-all: $(APP_ELF_8266) $(APP_ELF_32) $(APP_ELF_32S2) $(APP_ELF_32C3) $(APP_ELF_32S3) $(APP_ELF_32C2) $(APP_ELF_32C6) $(APP_ELF_32H2)
+all: $(APP_ELF_8266) $(APP_ELF_32) $(APP_ELF_32S2) $(APP_ELF_32C3) $(APP_ELF_32S3) $(APP_ELF_32C2) $(APP_ELF_32C6) $(APP_ELF_32H2) $(APP_ELF_32P4) $(APP_ELF_32C5)
 
-esp32: $(APP_ELF_32) $(APP_ELF_32S2) $(APP_ELF_32C3) $(APP_ELF_32S3) $(APP_ELF_32C2) $(APP_ELF_32C6) $(APP_ELF_32H2)
+esp32: $(APP_ELF_32) $(APP_ELF_32S2) $(APP_ELF_32C3) $(APP_ELF_32S3) $(APP_ELF_32C2) $(APP_ELF_32C6) $(APP_ELF_32C61) $(APP_ELF_32H2) $(APP_ELF_32P4) $(APP_ELF_32C5)
 
 $(BUILD_DIR):
 	$(Q) mkdir $@
@@ -78,9 +81,21 @@ $(APP_ELF_32C6): $(SRCS) $(BUILD_DIR) ld/app_32c6.ld
 	@echo "  CC(32C6)   $^ -> $@"
 	$(Q) $(CROSS_ESPRISCV32)gcc $(CFLAGS_ESPRISCV32) -DESP32C6=1 -Tapp_32c6.ld -Wl,-Map=$(@:.elf=.map) -o $@ $(filter %.c, $^) $(LDLIBS)
 
+$(APP_ELF_32C61): $(SRCS) $(BUILD_DIR) ld/app_32c61.ld
+	@echo "  CC(32C61)   $^ -> $@"
+	$(Q) $(CROSS_ESPRISCV32)gcc $(CFLAGS_ESPRISCV32) -DESP32C61=1 -Tapp_32c61.ld -Wl,-Map=$(@:.elf=.map) -o $@ $(filter %.c, $^) $(LDLIBS)
+
 $(APP_ELF_32H2): $(SRCS) $(BUILD_DIR) ld/app_32h2.ld
 	@echo "  CC(32H2)   $^ -> $@"
 	$(Q) $(CROSS_ESPRISCV32)gcc $(CFLAGS_ESPRISCV32) -DESP32H2=1 -Tapp_32h2.ld -Wl,-Map=$(@:.elf=.map) -o $@ $(filter %.c, $^) $(LDLIBS)
+
+$(APP_ELF_32P4): $(SRCS) $(BUILD_DIR) ld/app_32p4.ld
+	@echo "  CC(32P4)   $^ -> $@"
+	$(Q) $(CROSS_ESPRISCV32)gcc $(CFLAGS_ESPRISCV32) -DESP32P4=1 -Tapp_32p4.ld -Wl,-Map=$(@:.elf=.map) -o $@ $(filter %.c, $^) $(LDLIBS)
+
+$(APP_ELF_32C5): $(SRCS) $(BUILD_DIR) ld/app_32c5.ld
+	@echo "  CC(32C5)   $^ -> $@"
+	$(Q) $(CROSS_ESPRISCV32)gcc $(CFLAGS_ESPRISCV32) -DESP32C5=1 -Tapp_32c5.ld -Wl,-Map=$(@:.elf=.map) -o $@ $(filter %.c, $^) $(LDLIBS)
 
 clean:
 	$(Q) rm -rf $(BUILD_DIR)

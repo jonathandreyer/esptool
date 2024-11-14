@@ -6,6 +6,7 @@
 
 import binascii
 import struct
+import sys
 import time
 
 from bitstring import BitArray
@@ -57,9 +58,16 @@ class EspEfuses(base_fields.EspEfusesBase):
     debug = False
     do_not_confirm = False
 
-    def __init__(self, esp, skip_connect=False, debug=False, do_not_confirm=False):
+    def __init__(
+        self,
+        esp,
+        skip_connect=False,
+        debug=False,
+        do_not_confirm=False,
+        extend_efuse_table=None,
+    ):
         self.Blocks = EfuseDefineBlocks()
-        self.Fields = EfuseDefineFields()
+        self.Fields = EfuseDefineFields(extend_efuse_table)
         self.REGS = EfuseDefineRegisters
         self.BURN_BLOCK_DATA_NAMES = self.Blocks.get_burn_block_data_names()
         self.BLOCKS_FOR_KEYS = self.Blocks.get_blocks_for_keys()
@@ -94,7 +102,7 @@ class EspEfuses(base_fields.EspEfusesBase):
                 for efuse in self.Fields.BLOCK2_CALIBRATION_EFUSES
             ]
         else:
-            if self["BLK_VERSION_MAJOR"].get() == 1:
+            if self.get_block_version() >= 100:
                 self.efuses += [
                     EfuseField.convert(self, efuse)
                     for efuse in self.Fields.BLOCK2_CALIBRATION_EFUSES
@@ -160,9 +168,13 @@ class EspEfuses(base_fields.EspEfusesBase):
     def wait_efuse_idle(self):
         deadline = time.time() + self.REGS.EFUSE_BURN_TIMEOUT
         while time.time() < deadline:
-            # if self.read_reg(self.EFUSE_CMD_REG) == 0:
-            if self.read_reg(self.REGS.EFUSE_STATUS_REG) & 0x7 == 1:
-                return
+            cmds = self.REGS.EFUSE_PGM_CMD | self.REGS.EFUSE_READ_CMD
+            if self.read_reg(self.REGS.EFUSE_CMD_REG) & cmds == 0:
+                if self.read_reg(self.REGS.EFUSE_CMD_REG) & cmds == 0:
+                    # Due to a hardware error, we have to read READ_CMD again
+                    # to make sure the efuse clock is normal.
+                    # For PGM_CMD it is not necessary.
+                    return
         raise esptool.FatalError(
             "Timed out waiting for Efuse controller command to complete"
         )
@@ -202,7 +214,7 @@ class EspEfuses(base_fields.EspEfusesBase):
                     )
                     print("DIS_DOWNLOAD_MODE is enabled")
                     print("Successful")
-                    exit(0)  # finish without errors
+                    sys.exit(0)  # finish without errors
                 raise
 
             print("Established a connection with the chip")
@@ -216,7 +228,7 @@ class EspEfuses(base_fields.EspEfusesBase):
                     )
                     print("ENABLE_SECURITY_DOWNLOAD is enabled")
                     print("Successful")
-                    exit(0)  # finish without errors
+                    sys.exit(0)  # finish without errors
             raise
 
     def set_efuse_timing(self):
@@ -290,6 +302,28 @@ class EspEfuses(base_fields.EspEfusesBase):
         else:
             output = "Flash voltage (VDD_SPI) set to 3.3V by efuse."
         return output
+
+    def is_efuses_incompatible_for_burn(self):
+        # getting chip version: self._esp.get_chip_revision()
+        if (
+            (
+                self["DIS_USB_JTAG"].get(from_read=True)
+                and self["DIS_USB_SERIAL_JTAG"].get(from_read=False)
+            )
+            or (
+                self["DIS_USB_JTAG"].get(from_read=False)
+                and self["DIS_USB_SERIAL_JTAG"].get(from_read=True)
+            )
+            or (
+                self["DIS_USB_JTAG"].get(from_read=False)
+                and self["DIS_USB_SERIAL_JTAG"].get(from_read=False)
+            )
+        ):
+            print(
+                "DIS_USB_JTAG and DIS_USB_SERIAL_JTAG cannot be set together due to a bug in the ROM bootloader"
+            )
+            return True
+        return False
 
 
 class EfuseField(base_fields.EfuseFieldBase):

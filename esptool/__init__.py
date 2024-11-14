@@ -2,7 +2,7 @@
 # Espressif Systems (Shanghai) CO LTD, other contributors as noted.
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
-
+# PYTHON_ARGCOMPLETE_OK
 __all__ = [
     "chip_id",
     "detect_chip",
@@ -18,6 +18,7 @@ __all__ = [
     "merge_bin",
     "read_flash",
     "read_flash_status",
+    "read_flash_sfdp",
     "read_mac",
     "read_mem",
     "run",
@@ -28,7 +29,7 @@ __all__ = [
     "write_mem",
 ]
 
-__version__ = "4.7-dev"
+__version__ = "4.8.1"
 
 import argparse
 import inspect
@@ -38,6 +39,7 @@ import sys
 import time
 import traceback
 
+from esptool.bin_image import intel_hex_to_bin
 from esptool.cmds import (
     DETECTED_FLASH_SIZES,
     chip_id,
@@ -48,6 +50,7 @@ from esptool.cmds import (
     erase_flash,
     erase_region,
     flash_id,
+    read_flash_sfdp,
     get_security_info,
     image_info,
     load_ram,
@@ -65,7 +68,13 @@ from esptool.cmds import (
     write_mem,
 )
 from esptool.config import load_config_file
-from esptool.loader import DEFAULT_CONNECT_ATTEMPTS, ESPLoader, list_ports
+from esptool.loader import (
+    DEFAULT_CONNECT_ATTEMPTS,
+    DEFAULT_OPEN_PORT_ATTEMPTS,
+    StubFlasher,
+    ESPLoader,
+    list_ports,
+)
 from esptool.targets import CHIP_DEFS, CHIP_LIST, ESP32ROM
 from esptool.util import (
     FatalError,
@@ -73,6 +82,7 @@ from esptool.util import (
     flash_size_bytes,
     strip_chip_name,
 )
+from itertools import chain, cycle, repeat
 
 import serial
 
@@ -123,6 +133,14 @@ def main(argv=None, esp=None):
     )
 
     parser.add_argument(
+        "--port-filter",
+        action="append",
+        help="Serial port device filter, can be vid=NUMBER, pid=NUMBER, name=SUBSTRING, serial=SUBSTRING",
+        type=str,
+        default=[],
+    )
+
+    parser.add_argument(
         "--before",
         help="What to do before connecting to the chip",
         choices=["default_reset", "usb_reset", "no_reset", "no_reset_no_sync"],
@@ -142,6 +160,15 @@ def main(argv=None, esp=None):
         help="Disable launching the flasher stub, only talk to ROM bootloader. "
         "Some features will not be available.",
         action="store_true",
+    )
+
+    # --stub-version can be set with --no-stub so the tests wouldn't fail if this option is implied globally
+    parser.add_argument(
+        "--stub-version",
+        default=os.environ.get("ESPTOOL_STUB_VERSION", StubFlasher.STUB_SUBDIRS[0]),
+        choices=StubFlasher.STUB_SUBDIRS,
+        # not a public option and is not subject to the semantic versioning policy
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
@@ -176,16 +203,18 @@ def main(argv=None, esp=None):
         parent.add_argument(
             "--spi-connection",
             "-sc",
-            help="ESP32-only argument. Override default SPI Flash connection. "
+            help="Override default SPI Flash connection. "
             "Value can be SPI, HSPI or a comma-separated list of 5 I/O numbers "
-            "to use for SPI flash (CLK,Q,D,HD,CS).",
+            "to use for SPI flash (CLK,Q,D,HD,CS). Not supported with ESP8266.",
             action=SpiConnectionAction,
         )
 
     parser_load_ram = subparsers.add_parser(
         "load_ram", help="Download an image to RAM and execute"
     )
-    parser_load_ram.add_argument("filename", help="Firmware image")
+    parser_load_ram.add_argument(
+        "filename", help="Firmware image", action=AutoHex2BinAction
+    )
 
     parser_dump_mem = subparsers.add_parser(
         "dump_mem", help="Dump arbitrary memory to disk"
@@ -214,7 +243,12 @@ def main(argv=None, esp=None):
         default="0xFFFFFFFF",
     )
 
-    def add_spi_flash_subparsers(parent, allow_keep, auto_detect):
+    def add_spi_flash_subparsers(
+        parent: argparse.ArgumentParser,
+        allow_keep: bool,
+        auto_detect: bool,
+        size_only: bool = False,
+    ):
         """Add common parser arguments for SPI flash properties"""
         extra_keep_args = ["keep"] if allow_keep else []
 
@@ -231,33 +265,35 @@ def main(argv=None, esp=None):
             extra_fs_message = ""
             flash_sizes = []
 
-        parent.add_argument(
-            "--flash_freq",
-            "-ff",
-            help="SPI Flash frequency",
-            choices=extra_keep_args
-            + [
-                "80m",
-                "60m",
-                "48m",
-                "40m",
-                "30m",
-                "26m",
-                "24m",
-                "20m",
-                "16m",
-                "15m",
-                "12m",
-            ],
-            default=os.environ.get("ESPTOOL_FF", "keep" if allow_keep else None),
-        )
-        parent.add_argument(
-            "--flash_mode",
-            "-fm",
-            help="SPI Flash mode",
-            choices=extra_keep_args + ["qio", "qout", "dio", "dout"],
-            default=os.environ.get("ESPTOOL_FM", "keep" if allow_keep else "qio"),
-        )
+        if not size_only:
+            parent.add_argument(
+                "--flash_freq",
+                "-ff",
+                help="SPI Flash frequency",
+                choices=extra_keep_args
+                + [
+                    "80m",
+                    "60m",
+                    "48m",
+                    "40m",
+                    "30m",
+                    "26m",
+                    "24m",
+                    "20m",
+                    "16m",
+                    "15m",
+                    "12m",
+                ],
+                default=os.environ.get("ESPTOOL_FF", "keep" if allow_keep else None),
+            )
+            parent.add_argument(
+                "--flash_mode",
+                "-fm",
+                help="SPI Flash mode",
+                choices=extra_keep_args + ["qio", "qout", "dio", "dout"],
+                default=os.environ.get("ESPTOOL_FM", "keep" if allow_keep else "qio"),
+            )
+
         parent.add_argument(
             "--flash_size",
             "-fs",
@@ -357,7 +393,9 @@ def main(argv=None, esp=None):
     parser_image_info = subparsers.add_parser(
         "image_info", help="Dump headers from a binary file (bootloader or application)"
     )
-    parser_image_info.add_argument("filename", help="Image file to parse")
+    parser_image_info.add_argument(
+        "filename", help="Image file to parse", action=AutoHex2BinAction
+    )
     parser_image_info.add_argument(
         "--version",
         "-v",
@@ -463,7 +501,7 @@ def main(argv=None, esp=None):
     parser_elf2image.add_argument(
         "--use_segments",
         help="If set, ELF segments will be used instead of ELF sections "
-        "to genereate the image.",
+        "to generate the image.",
         action="store_true",
     )
     parser_elf2image.add_argument(
@@ -475,6 +513,17 @@ def main(argv=None, esp=None):
         "--pad-to-size",
         help="The block size with which the final binary image after padding "
         "must be aligned to. Value 0xFF is used for padding, similar to erase_flash",
+        default=None,
+    )
+    parser_elf2image.add_argument(
+        "--ram-only-header",
+        help="Order segments of the output so IRAM and DRAM are placed at the "
+        "beginning and force the main header segment number to RAM segments "
+        "quantity. This will make the other segments invisible to the ROM "
+        "loader. Use this argument with care because the ROM loader will load "
+        "only the RAM segments although the other segments being present in "
+        "the output. Implies --dont-append-digest",
+        action="store_true",
         default=None,
     )
 
@@ -524,7 +573,9 @@ def main(argv=None, esp=None):
     parser_read_flash = subparsers.add_parser(
         "read_flash", help="Read SPI flash content"
     )
-    add_spi_connection_arg(parser_read_flash)
+    add_spi_flash_subparsers(
+        parser_read_flash, allow_keep=True, auto_detect=True, size_only=True
+    )
     parser_read_flash.add_argument("address", help="Start address", type=arg_auto_int)
     parser_read_flash.add_argument(
         "size",
@@ -578,6 +629,14 @@ def main(argv=None, esp=None):
         type=arg_auto_size,
     )
 
+    parser_read_flash_sfdp = subparsers.add_parser(
+        "read_flash_sfdp",
+        help="Read SPI flash SFDP (Serial Flash Discoverable Parameters)",
+    )
+    add_spi_flash_subparsers(parser_read_flash_sfdp, allow_keep=True, auto_detect=True)
+    parser_read_flash_sfdp.add_argument("addr", type=arg_auto_int)
+    parser_read_flash_sfdp.add_argument("bytes", type=int)
+
     parser_merge_bin = subparsers.add_parser(
         "merge_bin",
         help="Merge multiple raw binary files into a single file for later flashing",
@@ -587,18 +646,36 @@ def main(argv=None, esp=None):
         "--output", "-o", help="Output filename", type=str, required=True
     )
     parser_merge_bin.add_argument(
-        "--format", "-f", help="Format of the output file", choices="raw", default="raw"
-    )  # for future expansion
+        "--format",
+        "-f",
+        help="Format of the output file",
+        choices=["raw", "uf2", "hex"],
+        default="raw",
+    )
+    uf2_group = parser_merge_bin.add_argument_group("UF2 format")
+    uf2_group.add_argument(
+        "--chunk-size",
+        help="Specify the used data part of the 512 byte UF2 block. "
+        "A common value is 256. By default the largest possible value will be used.",
+        default=None,
+        type=arg_auto_chunk_size,
+    )
+    uf2_group.add_argument(
+        "--md5-disable",
+        help="Disable MD5 checksum in UF2 output",
+        action="store_true",
+    )
     add_spi_flash_subparsers(parser_merge_bin, allow_keep=True, auto_detect=False)
 
-    parser_merge_bin.add_argument(
+    raw_group = parser_merge_bin.add_argument_group("RAW format")
+    raw_group.add_argument(
         "--target-offset",
         "-t",
         help="Target offset where the output file will be flashed",
         type=arg_auto_int,
         default=0,
     )
-    parser_merge_bin.add_argument(
+    raw_group.add_argument(
         "--fill-flash-size",
         help="If set, the final binary file will be padded with FF "
         "bytes up to this flash size.",
@@ -630,11 +707,42 @@ def main(argv=None, esp=None):
     for operation in subparsers.choices.keys():
         assert operation in globals(), "%s should be a module function" % operation
 
+    # Enable argcomplete only on Unix-like systems
+    if sys.platform != "win32":
+        try:
+            import argcomplete
+
+            argcomplete.autocomplete(parser)
+        except ImportError:
+            pass
+
     argv = expand_file_arguments(argv or sys.argv[1:])
 
     args = parser.parse_args(argv)
     print("esptool.py v%s" % __version__)
     load_config_file(verbose=True)
+
+    StubFlasher.set_preferred_stub_subdir(args.stub_version)
+
+    # Parse filter arguments into separate lists
+    args.filterVids = []
+    args.filterPids = []
+    args.filterNames = []
+    args.filterSerials = []
+    for f in args.port_filter:
+        kvp = f.split("=")
+        if len(kvp) != 2:
+            raise FatalError("Option --port-filter argument must consist of key=value")
+        if kvp[0] == "vid":
+            args.filterVids.append(arg_auto_int(kvp[1]))
+        elif kvp[0] == "pid":
+            args.filterPids.append(arg_auto_int(kvp[1]))
+        elif kvp[0] == "name":
+            args.filterNames.append(kvp[1])
+        elif kvp[0] == "serial":
+            args.filterSerials.append(kvp[1])
+        else:
+            raise FatalError("Option --port-filter argument key not recognized")
 
     # operation function can take 1 arg (args), 2 args (esp, arg)
     # or be a member function of the ESPLoader class.
@@ -671,10 +779,33 @@ def main(argv=None, esp=None):
             initial_baud = args.baud
 
         if args.port is None:
-            ser_list = get_port_list()
+            ser_list = get_port_list(
+                args.filterVids, args.filterPids, args.filterNames, args.filterSerials
+            )
             print("Found %d serial ports" % len(ser_list))
         else:
             ser_list = [args.port]
+        open_port_attempts = os.environ.get(
+            "ESPTOOL_OPEN_PORT_ATTEMPTS", DEFAULT_OPEN_PORT_ATTEMPTS
+        )
+        try:
+            open_port_attempts = int(open_port_attempts)
+        except ValueError:
+            raise SystemExit("Invalid value for ESPTOOL_OPEN_PORT_ATTEMPTS")
+        if open_port_attempts != 1:
+            if args.port is None or args.chip == "auto":
+                print(
+                    "WARNING: The ESPTOOL_OPEN_PORT_ATTEMPTS (open_port_attempts) option can only be used with --port and --chip arguments."
+                )
+            else:
+                esp = esp or connect_loop(
+                    args.port,
+                    initial_baud,
+                    args.chip,
+                    open_port_attempts,
+                    args.trace,
+                    args.before,
+                )
         esp = esp or get_default_connected_device(
             ser_list,
             port=args.port,
@@ -736,18 +867,44 @@ def main(argv=None, esp=None):
                     "Keeping initial baud rate %d" % initial_baud
                 )
 
-        # override common SPI flash parameter stuff if configured to do so
+        def _define_spi_conn(spi_connection):
+            """Prepare SPI configuration string and value for flash_spi_attach()"""
+            clk, q, d, hd, cs = spi_connection
+            spi_config_txt = f"CLK:{clk}, Q:{q}, D:{d}, HD:{hd}, CS:{cs}"
+            value = (hd << 24) | (cs << 18) | (d << 12) | (q << 6) | clk
+            return spi_config_txt, value
+
+        # Override the common SPI flash parameter stuff if configured to do so
         if hasattr(args, "spi_connection") and args.spi_connection is not None:
-            if esp.CHIP_NAME != "ESP32":
-                raise FatalError(
-                    "Chip %s does not support --spi-connection option." % esp.CHIP_NAME
-                )
-            print("Configuring SPI flash mode...")
-            esp.flash_spi_attach(args.spi_connection)
+            spi_config = args.spi_connection
+            if args.spi_connection == "SPI":
+                value = 0
+            elif args.spi_connection == "HSPI":
+                value = 1
+            else:
+                esp.check_spi_connection(args.spi_connection)
+                # Encode the pin numbers as a 32-bit integer with packed 6-bit values,
+                # the same way the ESP ROM takes them
+                spi_config, value = _define_spi_conn(args.spi_connection)
+            print(f"Configuring SPI flash mode ({spi_config})...")
+            esp.flash_spi_attach(value)
         elif args.no_stub:
-            print("Enabling default SPI flash mode...")
-            # ROM loader doesn't enable flash unless we explicitly do it
-            esp.flash_spi_attach(0)
+            if esp.CHIP_NAME != "ESP32" or esp.secure_download_mode:
+                print("Enabling default SPI flash mode...")
+                # ROM loader doesn't enable flash unless we explicitly do it
+                esp.flash_spi_attach(0)
+            else:
+                # ROM doesn't attach in-package flash chips
+                spi_chip_pads = esp.get_chip_spi_pads()
+                spi_config_txt, value = _define_spi_conn(spi_chip_pads)
+                if spi_chip_pads != (0, 0, 0, 0, 0):
+                    print(
+                        "Attaching flash from eFuses' SPI pads configuration"
+                        f"({spi_config_txt})..."
+                    )
+                else:
+                    print("Enabling default SPI flash mode...")
+                esp.flash_spi_attach(value)
 
         # XMC chip startup sequence
         XMC_VENDOR_ID = 0x20
@@ -812,6 +969,15 @@ def main(argv=None, esp=None):
                         "Try checking the chip connections or removing "
                         "any other hardware connected to IOs."
                     )
+                    if (
+                        hasattr(args, "spi_connection")
+                        and args.spi_connection is not None
+                    ):
+                        print(
+                            "Some GPIO pins might be used by other peripherals, "
+                            "try using another --spi-connection combination."
+                        )
+
             except FatalError as e:
                 raise FatalError(f"Unable to verify flash chip connection ({e}).")
 
@@ -828,13 +994,21 @@ def main(argv=None, esp=None):
                 flash_size = detect_flash_size(esp, args)
             elif args.flash_size == "keep":
                 flash_size = detect_flash_size(esp, args=None)
+                if not esp.IS_STUB:
+                    print(
+                        "WARNING: In case of failure, please set a specific --flash_size."
+                    )
             else:
                 flash_size = args.flash_size
 
             if flash_size is not None:  # Secure download mode
                 esp.flash_set_parameters(flash_size_bytes(flash_size))
                 # Check if stub supports chosen flash size
-                if esp.IS_STUB and flash_size in ("32MB", "64MB", "128MB"):
+                if (
+                    esp.IS_STUB
+                    and esp.CHIP_NAME != "ESP32-S3"
+                    and flash_size_bytes(flash_size) > 16 * 1024 * 1024
+                ):
                     print(
                         "WARNING: Flasher stub doesn't fully support flash size larger "
                         "than 16MB, in case of failure use --no-stub."
@@ -858,7 +1032,7 @@ def main(argv=None, esp=None):
             args.size = flash_size_bytes(size_str)
 
         if esp.IS_STUB and hasattr(args, "address") and hasattr(args, "size"):
-            if args.address + args.size > 0x1000000:
+            if esp.CHIP_NAME != "ESP32-S3" and args.address + args.size > 0x1000000:
                 print(
                     "WARNING: Flasher stub doesn't fully support flash size larger "
                     "than 16MB, in case of failure use --no-stub."
@@ -906,14 +1080,41 @@ def arg_auto_size(x):
     return x if x == "all" else arg_auto_int(x)
 
 
-def get_port_list():
+def arg_auto_chunk_size(string: str) -> int:
+    num = int(string, 0)
+    if num & 3 != 0:
+        raise argparse.ArgumentTypeError("Chunk size should be a 4-byte aligned number")
+    return num
+
+
+def get_port_list(vids=[], pids=[], names=[], serials=[]):
     if list_ports is None:
         raise FatalError(
             "Listing all serial ports is currently not available. "
             "Please try to specify the port when running esptool.py or update "
             "the pyserial package to the latest version"
         )
-    return sorted(ports.device for ports in list_ports.comports())
+    ports = []
+    for port in list_ports.comports():
+        if sys.platform == "darwin" and port.device.endswith(
+            ("Bluetooth-Incoming-Port", "wlan-debug")
+        ):
+            continue
+        if vids and (port.vid is None or port.vid not in vids):
+            continue
+        if pids and (port.pid is None or port.pid not in pids):
+            continue
+        if names and (
+            port.name is None or all(name not in port.name for name in names)
+        ):
+            continue
+        if serials and (
+            port.serial_number is None
+            or all(serial not in port.serial_number for serial in serials)
+        ):
+            continue
+        ports.append(port.device)
+    return sorted(ports)
 
 
 def expand_file_arguments(argv):
@@ -937,6 +1138,53 @@ def expand_file_arguments(argv):
         print(f"esptool.py {' '.join(new_args)}")
         return new_args
     return argv
+
+
+def connect_loop(
+    port: str,
+    initial_baud: int,
+    chip: str,
+    max_retries: int,
+    trace: bool = False,
+    before: str = "default_reset",
+):
+    chip_class = CHIP_DEFS[chip]
+    esp = None
+    print(f"Serial port {port}")
+
+    first = True
+    ten_cycle = cycle(chain(repeat(False, 9), (True,)))
+    retry_loop = chain(
+        repeat(False, max_retries - 1), (True,) if max_retries else cycle((False,))
+    )
+
+    for last, every_tenth in zip(retry_loop, ten_cycle):
+        try:
+            esp = chip_class(port, initial_baud, trace)
+            if not first:
+                # break the retrying line
+                print("")
+            esp.connect(before)
+            return esp
+        except (
+            FatalError,
+            serial.serialutil.SerialException,
+            IOError,
+            OSError,
+        ) as err:
+            if esp and esp._port:
+                esp._port.close()
+            esp = None
+            if first:
+                print(err)
+                print("Retrying failed connection", end="", flush=True)
+                first = False
+            if last:
+                raise err
+            if every_tenth:
+                # print a dot every second
+                print(".", end="", flush=True)
+            time.sleep(0.1)
 
 
 def get_default_connected_device(
@@ -978,42 +1226,44 @@ class SpiConnectionAction(argparse.Action):
     """
 
     def __call__(self, parser, namespace, value, option_string=None):
-        if value.upper() == "SPI":
-            value = 0
-        elif value.upper() == "HSPI":
-            value = 1
+        if value.upper() in ["SPI", "HSPI"]:
+            values = value.upper()
         elif "," in value:
             values = value.split(",")
             if len(values) != 5:
                 raise argparse.ArgumentError(
                     self,
-                    "%s is not a valid list of comma-separate pin numbers. "
-                    "Must be 5 numbers - CLK,Q,D,HD,CS." % value,
+                    f"{value} is not a valid list of comma-separate pin numbers. "
+                    "Must be 5 numbers - CLK,Q,D,HD,CS.",
                 )
             try:
                 values = tuple(int(v, 0) for v in values)
             except ValueError:
                 raise argparse.ArgumentError(
                     self,
-                    "%s is not a valid argument. All pins must be numeric values"
-                    % values,
+                    f"{values} is not a valid argument. "
+                    "All pins must be numeric values",
                 )
-            if any([v for v in values if v > 33 or v < 0]):
-                raise argparse.ArgumentError(
-                    self, "Pin numbers must be in the range 0-33."
-                )
-            # encode the pin numbers as a 32-bit integer with packed 6-bit values,
-            # the same way ESP32 ROM takes them
-            # TODO: make this less ESP32 ROM specific somehow...
-            clk, q, d, hd, cs = values
-            value = (hd << 24) | (cs << 18) | (d << 12) | (q << 6) | clk
         else:
             raise argparse.ArgumentError(
                 self,
-                "%s is not a valid spi-connection value. "
-                "Values are SPI, HSPI, or a sequence of 5 pin numbers CLK,Q,D,HD,CS)."
-                % value,
+                f"{value} is not a valid spi-connection value. "
+                "Values are SPI, HSPI, or a sequence of 5 pin numbers - CLK,Q,D,HD,CS.",
             )
+        setattr(namespace, self.dest, values)
+
+
+class AutoHex2BinAction(argparse.Action):
+    """Custom parser class for auto conversion of input files from hex to bin"""
+
+    def __call__(self, parser, namespace, value, option_string=None):
+        try:
+            with open(value, "rb") as f:
+                # if hex file was detected replace hex file with converted temp bin
+                # otherwise keep the original file
+                value = intel_hex_to_bin(f).name
+        except IOError as e:
+            raise argparse.ArgumentError(self, e)
         setattr(namespace, self.dest, value)
 
 
@@ -1045,6 +1295,8 @@ class AddrFilenamePairAction(argparse.Action):
                     "Must be pairs of an address "
                     "and the binary filename to write there",
                 )
+            # check for intel hex files and convert them to bin
+            argfile = intel_hex_to_bin(argfile, address)
             pairs.append((address, argfile))
 
         # Sort the addresses and check for overlapping

@@ -6,6 +6,8 @@
 
 {IDF_TARGET_FLASH_FREQ_2:default="20", esp32c2="15", esp32h2="12"}
 
+{IDF_TARGET_BOOTLOADER_OFFSET:default="0x0", esp32="0x1000", esp32s2="0x1000", esp32p4="0x2000"}
+
 
 .. _image-format:
 
@@ -47,7 +49,7 @@ The image header is 8 bytes long:
     +--------+--------------------------------------------------------------------------------------------------+
 
 
-.. only:: esp32s2 or esp32s3
+.. only:: esp32s2 or esp32s3 or esp32p4
 
     +--------+------------------------------------------------------------------------------------------------+
     | Byte   | Description                                                                                    |
@@ -89,7 +91,25 @@ The image header is 8 bytes long:
         Flash frequency with value ``0`` can mean either 80MHz or 40MHz based on MSPI clock source mode.
 
 
-.. only:: not (esp8266 or esp32c6 or esp32s3 or esp32s2)
+.. only:: esp32c5 or esp32c61
+
+    +--------+------------------------------------------------------------------------------------------------+
+    | Byte   | Description                                                                                    |
+    +========+================================================================================================+
+    | 0      | Magic number (always ``0xE9``)                                                                 |
+    +--------+------------------------------------------------------------------------------------------------+
+    | 1      | Number of segments                                                                             |
+    +--------+------------------------------------------------------------------------------------------------+
+    | 2      | SPI Flash Mode (``0`` = QIO, ``1`` = QOUT, ``2`` = DIO, ``3`` = DOUT)                          |
+    +--------+------------------------------------------------------------------------------------------------+
+    | 3      | High four bits - Flash size (``0`` = 1MB, ``1`` = 2MB, ``2`` = 4MB, ``3`` = 8MB, ``4`` = 16MB) |
+    |        |                                                                                                |
+    |        | Low four bits - Flash frequency (``0xf`` = {IDF_TARGET_FLASH_FREQ_F}MHz, ``0`` = {IDF_TARGET_FLASH_FREQ_0}MHz, ``2`` = {IDF_TARGET_FLASH_FREQ_2}MHz)                |
+    +--------+------------------------------------------------------------------------------------------------+
+    | 4-7    | Entry point address                                                                            |
+    +--------+------------------------------------------------------------------------------------------------+
+
+.. only:: not (esp8266 or esp32c6 or esp32s3 or esp32s2 or esp32p4 or esp32c5 or esp32c61)
 
     +--------+------------------------------------------------------------------------------------------------+
     | Byte   | Description                                                                                    |
@@ -108,7 +128,7 @@ The image header is 8 bytes long:
     +--------+------------------------------------------------------------------------------------------------+
 
 
-``esptool.py`` overrides the 2nd and 3rd (start from 0) bytes according to the SPI flash info provided through command line option, but only if there is no SHA256 digest appended after the image. Therefore, if you would like to change SPI flash info during flashing, i.e. with the ``esptool.py write_flash`` command, then generate images without SHA256 digests. This can be achieved by running ``esptool.py elf2image`` with the ``--dont-append-digest`` argument.
+``esptool.py`` overrides the 2nd and 3rd (counted from 0) bytes according to the SPI flash info provided through the command line option. These bytes are only overridden if this is a bootloader image (an image written to a correct bootloader offset of {IDF_TARGET_BOOTLOADER_OFFSET}), in this case, the appended SHA256 digest is also updated to reflect the header changes. Generating images without SHA256 digest can be achieved by running ``esptool.py elf2image`` with the ``--dont-append-digest`` argument.
 
 .. only:: esp8266
 

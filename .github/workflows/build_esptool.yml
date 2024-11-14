@@ -4,58 +4,68 @@ on: [push, pull_request]
 
 jobs:
   build-esptool-binaries:
-    name: Build esptool binaries for ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: Build esptool binaries for ${{ matrix.platform }}
+    runs-on: ${{ matrix.RUN_ON }}
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-20.04, windows-latest, ARM, ARM64]
+        platform: [macos-amd64, macos-arm64, windows, linux-amd64, linux-arm32, linux-arm64]
         include:
-        - os: macos-latest
-          TARGET: macos
+        - platform: macos-amd64
+          TARGET: macos-amd64
           SEPARATOR: ':'
-        - os: ubuntu-20.04
-          TARGET: linux-amd64
+          RUN_ON: macos-13 # Versions 13 and lower are Intel-based.
+        - platform: macos-arm64
+          TARGET: macos-arm64
           SEPARATOR: ':'
-        - os: windows-latest
+          RUN_ON: macos-latest # Versions 14 and higher are ARM-based.
+        - platform: windows
           TARGET: win64
           EXTEN: .exe
           SEPARATOR: ';'
-        - os: ARM
-          CONTAINER: python:3.8-bullseye
-          TARGET: arm
+          RUN_ON: windows-latest
+        - platform: linux-amd64
+          TARGET: linux-amd64
           SEPARATOR: ':'
-        - os: ARM64
+          RUN_ON: ubuntu-20.04
+        - platform: linux-arm32
           CONTAINER: python:3.8-bullseye
-          TARGET: arm64
+          TARGET: linux-arm32
           SEPARATOR: ':'
+          RUN_ON: [ARM, self-hosted, linux, docker]
+        - platform: linux-arm64
+          CONTAINER: python:3.8-bullseye
+          TARGET: linux-arm64
+          SEPARATOR: ':'
+          RUN_ON: [ARM64, self-hosted, linux]
     container: ${{ matrix.CONTAINER }} # use python container on ARM
     env:
       DISTPATH: esptool-${{ matrix.TARGET }}
-      STUBS_DIR: /esptool/targets/stub_flasher/
-      EFUSE_DIR: /espefuse/efuse_defs/
+      STUBS_DIR: ./esptool/targets/stub_flasher/
+      EFUSE_DIR: ./espefuse/efuse_defs/
       PIP_EXTRA_INDEX_URL: "https://dl.espressif.com/pypi"
     steps:
       - name: Checkout repository
         uses: actions/checkout@master
       - name: Set up Python 3.8
         # Skip setting python on ARM because of missing compatibility: https://github.com/actions/setup-python/issues/108
-        if: matrix.os != 'ARM' && matrix.os != 'ARM64'
+        if: matrix.platform != 'linux-arm32' && matrix.platform != 'linux-arm64'
         uses: actions/setup-python@master
         with:
           python-version: 3.8
       - name: Install dependencies
+        # PyInstaller >=6.0 results in significantly more antivirus false positives
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller
+          pip install pyinstaller==5.13.2
           pip install --user -e .
       - name: Build with PyInstaller
         run: |
-          pyinstaller --distpath ./${{ env.DISTPATH }} -F --icon=ci/espressif.ico --add-data=".${{ env.STUBS_DIR }}*.json${{ matrix.SEPARATOR }}${{ env.STUBS_DIR }}" esptool.py
-          pyinstaller --distpath ./${{ env.DISTPATH }} -F --icon=ci/espressif.ico --add-data=".${{ env.EFUSE_DIR }}*.yaml${{ matrix.SEPARATOR }}${{ env.EFUSE_DIR }}" espefuse.py
+          pyinstaller --distpath ./${{ env.DISTPATH }} -F --icon=ci/espressif.ico --add-data="${{ env.STUBS_DIR }}1/*.json${{ matrix.SEPARATOR }}${{ env.STUBS_DIR }}1/" --add-data="${{ env.STUBS_DIR }}2/*.json${{ matrix.SEPARATOR }}${{ env.STUBS_DIR }}2/" esptool.py
+          pyinstaller --distpath ./${{ env.DISTPATH }} -F --icon=ci/espressif.ico --add-data="${{ env.EFUSE_DIR }}*.yaml${{ matrix.SEPARATOR }}${{ env.EFUSE_DIR }}" espefuse.py
           pyinstaller --distpath ./${{ env.DISTPATH }} -F --icon=ci/espressif.ico espsecure.py
           pyinstaller --distpath ./${{ env.DISTPATH }} -F --icon=ci/espressif.ico esp_rfc2217_server.py
       - name: Sign binaries
-        if: matrix.os == 'windows-latest' && github.event_name != 'pull_request'
+        if: matrix.platform == 'windows' && github.event_name != 'pull_request'
         env:
           CERTIFICATE: ${{ secrets.CERTIFICATE }}
           CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
@@ -83,52 +93,52 @@ jobs:
 
   create_release:
     name: Create GitHub release
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') && !(contains(github.ref_name, 'dev'))
     needs: build-esptool-binaries
     runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      VERSION: ${{ steps.get_version.outputs.VERSION }}
+    env:
+      PIP_EXTRA_INDEX_URL: "https://dl.espressif.com/pypi"
+    permissions:
+      contents: write
     steps:
-      - name: Create release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Version ${{ github.ref }}
-          draft: true
-          prerelease: false
       - name: Get version
         id: get_version
-        run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
         shell: bash
-
-  upload_assets:
-    name: Upload release assets
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: create_release
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        TARGET: [macos, linux-amd64, win64, arm, arm64]
-    env:
-      DISTPATH: esptool-${{ needs.create_release.outputs.VERSION }}-${{ matrix.TARGET }}
-    steps:
+      - name: Checkout
+        uses: actions/checkout@master
+        with:
+          fetch-depth: 0
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --user -e ".[dev]"
+      - name: Generate changelog
+        run: |
+          cz changelog ${{ steps.get_version.outputs.VERSION }} --template ci/gh_changelog_template.md.j2 --file-name changelog_body.md
+          cat changelog_body.md
       - name: Download built binaries
         uses: actions/download-artifact@master
-      - name: Rename and package binaries
+      - name: Compress and rename binaries
         run: |
-          mv esptool-${{ matrix.TARGET }} ${{ env.DISTPATH }}
-          zip -r ${{ env.DISTPATH }}.zip ./${{ env.DISTPATH }}/*
-      - name: Upload release assets
-        id: upload-release-asset
-        uses: actions/upload-release-asset@v1
+          for dir in esptool-*; do
+            if [[ "$dir" == esptool-win* ]]; then
+              zip -r "esptool-v${{ steps.get_version.outputs.VERSION }}-${dir#esptool-}.zip" "$dir"
+            else
+              chmod -R u=rwx,g=rx,o=rx "$dir"
+              tar -cvzf "esptool-v${{ steps.get_version.outputs.VERSION }}-${dir#esptool-}.tar.gz" "$dir"
+            fi
+          done
+      - name: Create release
+        id: create_release
+        uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ needs.create_release.outputs.upload_url }}
-          asset_path: "${{ env.DISTPATH }}.zip"
-          asset_name: "${{ env.DISTPATH }}.zip"
-          asset_content_type: application/zip
+          body_path: changelog_body.md
+          name: Version ${{ steps.get_version.outputs.VERSION }}
+          draft: true
+          prerelease: false
+          files: |
+            esptool-v${{ steps.get_version.outputs.VERSION }}-*.zip
+            esptool-v${{ steps.get_version.outputs.VERSION }}-*.tar.gz

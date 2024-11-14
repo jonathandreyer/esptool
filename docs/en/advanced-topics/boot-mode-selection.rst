@@ -1,8 +1,8 @@
-{IDF_TARGET_STRAP_BOOT_GPIO:default="GPIO9", esp32="GPIO0", esp32s2="GPIO0", esp32s3="GPIO0"}
+{IDF_TARGET_STRAP_BOOT_GPIO:default="GPIO9", esp32="GPIO0", esp32s2="GPIO0", esp32s3="GPIO0", esp32p4="GPIO35", esp32c5="GPIO28"}
 
-{IDF_TARGET_STRAP_BOOT_2_GPIO:default="GPIO8", esp32="GPIO2", esp32s2="GPIO46", esp32s3="GPIO46"}
+{IDF_TARGET_STRAP_BOOT_2_GPIO:default="GPIO8", esp32="GPIO2", esp32s2="GPIO46", esp32s3="GPIO46", esp32p4="GPIO36", esp32c5="GPIO27"}
 
-{IDF_TARGET_BOOTLOADER_OFFSET:default="0",esp32="1000", esp32s2="1000"}
+{IDF_TARGET_BOOTLOADER_OFFSET:default="0", esp32="1000", esp32s2="1000", esp32p4="2000"}
 
 .. _boot-mode:
 
@@ -65,13 +65,16 @@ This guide explains how to select the boot mode correctly and describes the boot
 
    The {IDF_TARGET_NAME} will enter the serial bootloader when {IDF_TARGET_STRAP_BOOT_GPIO} is held low on reset. Otherwise it will run the program in flash.
 
-   +---------------+----------------------------------------+
-   | {IDF_TARGET_STRAP_BOOT_GPIO} Input   | Mode                                   |
-   +===============+========================================+
-   | Low/GND       | ROM serial bootloader for esptool      |
-   +---------------+----------------------------------------+
-   | High/VCC      | Normal execution mode                  |
-   +---------------+----------------------------------------+
+   .. list-table::
+      :widths: 10 25
+      :header-rows: 1
+
+      * - {IDF_TARGET_STRAP_BOOT_GPIO} Input
+        - Mode
+      * - Low/GND
+        - ROM serial bootloader for esptool
+      * - High/VCC
+        - Normal execution mode
 
    {IDF_TARGET_STRAP_BOOT_GPIO} has an internal pullup resistor, so if it is left unconnected then it will pull high.
 
@@ -80,11 +83,11 @@ This guide explains how to select the boot mode correctly and describes the boot
    {IDF_TARGET_STRAP_BOOT_2_GPIO}
    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-   .. only:: not esp32c3
+   .. only:: esp32 or esp32s2 or esp32s3
 
       {IDF_TARGET_STRAP_BOOT_2_GPIO} must also be either left unconnected/floating, or driven Low, in order to enter the serial bootloader.
 
-   .. only:: esp32c3 or esp32c2 or esp32h2 or esp32c6
+   .. only:: esp32c3 or esp32c2 or esp32h2 or esp32c6 or esp32p4 or esp32c5 or esp32c61
 
       {IDF_TARGET_STRAP_BOOT_2_GPIO} must also be driven High, in order to enter the serial bootloader reliably. The strapping combination of {IDF_TARGET_STRAP_BOOT_2_GPIO} = 0 and {IDF_TARGET_STRAP_BOOT_GPIO} = 0 is invalid and will trigger unexpected behavior.
 
@@ -125,7 +128,7 @@ Automatic Bootloader
 
 As an example of auto-reset curcuitry implementation, check the `schematic <https://dl.espressif.com/dl/schematics/esp32_devkitc_v4-sch-20180607a.pdf>`_ of the ESP32 DevKitC development board:
 
--  The **Micro USB 5V & USB-UART** section shows the ``DTR`` and ``RTS`` control lines of the USB to serial converter chip connected to ``GPIO0`` and ``EN`` pins of the ESP module.
+-  The **Micro USB 5V & USB-UART** section shows the ``DTR`` and ``RTS`` control lines of the USB to serial converter chip connected to ``{IDF_TARGET_STRAP_BOOT_GPIO}`` and ``EN`` pins of the ESP module.
 -  Some OS and/or drivers may activate ``RTS`` and or ``DTR`` automatically when opening the serial port (true only for some serial terminal programs, not ``esptool.py``), pulling them low together and holding the ESP in reset. If ``RTS`` is wired directly to ``EN`` then RTS/CTS "hardware flow control" needs to be disabled in the serial program to avoid this.
    An additional circuitry is implemented in order to avoid this problem - if both ``RTS`` and ``DTR`` are asserted together, this doesn't reset the chip. The schematic shows this specific circuit with two transistors and its truth table.
 -  If this circuitry is implemented (all Espressif boards have it), adding a capacitor between the ``EN`` pin and ``GND`` (in the 1uF-10uF range) is necessary for the reset circuitry to work reliably. This is shown in the **ESP32 Module** section of the schematic.
@@ -133,13 +136,15 @@ As an example of auto-reset curcuitry implementation, check the `schematic <http
 
 Make the following connections for ``esptool`` to automatically enter the bootloader of an {IDF_TARGET_NAME} chip:
 
-+-------------+--------------+
-| ESP Pin     | Serial Pin   |
-+=============+==============+
-| EN          | RTS          |
-+-------------+--------------+
-| {IDF_TARGET_STRAP_BOOT_GPIO}       | DTR          |
-+-------------+--------------+
+.. list-table::
+   :header-rows: 1
+
+   * - ESP Pin
+     - Serial Pin
+   * - EN
+     - RTS
+   * - {IDF_TARGET_STRAP_BOOT_GPIO}
+     - DTR
 
 In Linux serial ports by default will assert RTS when nothing is attached to them. This can hold the {IDF_TARGET_NAME} in a reset loop which may cause some serial adapters to subsequently reset loop. This functionality can be disabled by disabling ``HUPCL`` (ie ``sudo stty -F /dev/ttyUSB0 -hupcl``).
 
@@ -160,6 +165,10 @@ Depending on the kind of hardware you have, it may also be possible to manually 
 
 - For development boards produced by Espressif, this information can be found in the respective getting started guides or user guides. For example, to manually reset a development board, hold down the **Boot** button (``{IDF_TARGET_STRAP_BOOT_GPIO}``) and press the **EN** button (``EN`` (``CHIP_PU``)).
 - For other types of hardware, try pulling ``{IDF_TARGET_STRAP_BOOT_GPIO}`` down.
+
+.. note::
+
+   If esptool is able to reset the chip but for some reason the chip is not entering into bootloader mode then hold down the Boot button (or pull down ``{IDF_TARGET_STRAP_BOOT_GPIO}``) while you start esptool and keep it down during reset.
 
 .. only:: esp8266
 
@@ -235,13 +244,13 @@ Depending on the kind of hardware you have, it may also be possible to manually 
       rst:0x1 (POWERON_RESET),boot:0x3 (DOWNLOAD_BOOT(UART0/UART1/SDIO_REI_REO_V2))
 
 
-   ``rst:0xNN (REASON)`` is an enumerated value (and description) of the reason for the reset. A mapping between the hex value and each reason can be found in the `ESP-IDF source under RESET_REASON enum <https://github.com/espressif/esp-idf/blob/release/v5.0/components/esp_rom/include/{IDF_TARGET_PATH_NAME}/rom/rtc.h>`__.
-   The value can be read in {IDF_TARGET_NAME} code via the `get_reset_reason() ROM function <https://github.com/espressif/esp-idf/blob/release/v5.0/components/esp_rom/include/{IDF_TARGET_PATH_NAME}/rom/rtc.h>`__.
+   ``rst:0xNN (REASON)`` is an enumerated value (and description) of the reason for the reset. A mapping between the hex value and each reason can be found in the `ESP-IDF source under RESET_REASON enum <https://github.com/espressif/esp-idf/blob/release/v5.2/components/esp_rom/include/{IDF_TARGET_PATH_NAME}/rom/rtc.h>`__.
+   The value can be read in {IDF_TARGET_NAME} code via the `get_reset_reason() ROM function <https://github.com/espressif/esp-idf/blob/release/v5.2/components/esp_rom/include/{IDF_TARGET_PATH_NAME}/rom/rtc.h>`__.
 
-   ``boot:0xNN (DESCRIPTION)`` is the hex value of the strapping pins, as represented in the `GPIO_STRAP register <https://github.com/espressif/esp-idf/blob/release/v5.0/components/soc/{IDF_TARGET_PATH_NAME}/include/soc/gpio_reg.h>`__.
+   ``boot:0xNN (DESCRIPTION)`` is the hex value of the strapping pins, as represented in the `GPIO_STRAP register <https://github.com/espressif/esp-idf/blob/release/v5.2/components/soc/{IDF_TARGET_PATH_NAME}/include/soc/gpio_reg.h>`__.
 
    The individual bit values are as follows:
-   
+
    .. only:: esp32
 
       -  ``0x01`` - GPIO5
@@ -308,7 +317,7 @@ Depending on the kind of hardware you have, it may also be possible to manually 
          clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
          mode:DIO, clock div:1
 
-   
+
    .. only:: not esp32
 
       ::

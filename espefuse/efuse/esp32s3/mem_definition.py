@@ -112,15 +112,11 @@ class EfuseDefineBlocks(EfuseBlocksBase):
 
 
 class EfuseDefineFields(EfuseFieldsBase):
-    def __init__(self) -> None:
+    def __init__(self, extend_efuse_table) -> None:
         # List of efuse fields from TRM the chapter eFuse Controller.
         self.EFUSES = []
-
         self.KEYBLOCKS = []
-
-        # if BLK_VERSION_MAJOR is 1, these efuse fields are in BLOCK2
         self.BLOCK2_CALIBRATION_EFUSES = []
-
         self.CALC = []
 
         dir_name = os.path.dirname(os.path.abspath(__file__))
@@ -130,7 +126,7 @@ class EfuseDefineFields(EfuseFieldsBase):
         efuse_file = os.path.join(dir_name, "efuse_defs", file_name)
         with open(f"{efuse_file}", "r") as r_file:
             e_desc = yaml.safe_load(r_file)
-        super().__init__(e_desc)
+        super().__init__(e_desc, extend_efuse_table)
 
         for i, efuse in enumerate(self.ALL_EFUSES):
             if efuse.name in [
@@ -161,6 +157,16 @@ class EfuseDefineFields(EfuseFieldsBase):
         f.category = "identity"
         f.class_type = "wafer"
         f.description = "calc WAFER VERSION MINOR = WAFER_VERSION_MINOR_HI << 3 + WAFER_VERSION_MINOR_LO (read only)"
+        self.CALC.append(f)
+
+        f = Field()
+        f.name = "PSRAM_CAPACITY"
+        f.block = 0
+        f.bit_len = 3
+        f.type = f"uint:{f.bit_len}"
+        f.category = "identity"
+        f.class_type = "psram_cap"
+        f.description = "calc as = PSRAM_CAP_3 << 2 + PSRAM_CAP (read only)"
         self.CALC.append(f)
 
         for efuse in self.ALL_EFUSES:

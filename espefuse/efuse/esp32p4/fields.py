@@ -6,6 +6,7 @@
 
 import binascii
 import struct
+import sys
 import time
 
 from bitstring import BitArray
@@ -57,9 +58,16 @@ class EspEfuses(base_fields.EspEfusesBase):
     debug = False
     do_not_confirm = False
 
-    def __init__(self, esp, skip_connect=False, debug=False, do_not_confirm=False):
+    def __init__(
+        self,
+        esp,
+        skip_connect=False,
+        debug=False,
+        do_not_confirm=False,
+        extend_efuse_table=None,
+    ):
         self.Blocks = EfuseDefineBlocks()
-        self.Fields = EfuseDefineFields()
+        self.Fields = EfuseDefineFields(extend_efuse_table)
         self.REGS = EfuseDefineRegisters
         self.BURN_BLOCK_DATA_NAMES = self.Blocks.get_burn_block_data_names()
         self.BLOCKS_FOR_KEYS = self.Blocks.get_blocks_for_keys()
@@ -94,12 +102,11 @@ class EspEfuses(base_fields.EspEfusesBase):
                 for efuse in self.Fields.BLOCK2_CALIBRATION_EFUSES
             ]
         else:
-            # TODO add processing of self.Fields.BLOCK2_CALIBRATION_EFUSES
-            # if self["BLK_VERSION_MINOR"].get() == 1:
-            #     self.efuses += [
-            #         EfuseField.convert(self, efuse)
-            #         for efuse in self.Fields.BLOCK2_CALIBRATION_EFUSES
-            #     ]
+            if self.get_block_version() >= 1:
+                self.efuses += [
+                    EfuseField.convert(self, efuse)
+                    for efuse in self.Fields.BLOCK2_CALIBRATION_EFUSES
+                ]
             self.efuses += [
                 EfuseField.convert(self, efuse) for efuse in self.Fields.CALC
             ]
@@ -161,9 +168,13 @@ class EspEfuses(base_fields.EspEfusesBase):
     def wait_efuse_idle(self):
         deadline = time.time() + self.REGS.EFUSE_BURN_TIMEOUT
         while time.time() < deadline:
-            # if self.read_reg(self.REGS.EFUSE_CMD_REG) == 0:
-            if self.read_reg(self.REGS.EFUSE_STATUS_REG) & 0x7 == 1:
-                return
+            cmds = self.REGS.EFUSE_PGM_CMD | self.REGS.EFUSE_READ_CMD
+            if self.read_reg(self.REGS.EFUSE_CMD_REG) & cmds == 0:
+                if self.read_reg(self.REGS.EFUSE_CMD_REG) & cmds == 0:
+                    # Due to a hardware error, we have to read READ_CMD again
+                    # to make sure the efuse clock is normal.
+                    # For PGM_CMD it is not necessary.
+                    return
         raise esptool.FatalError(
             "Timed out waiting for Efuse controller command to complete"
         )
@@ -203,7 +214,7 @@ class EspEfuses(base_fields.EspEfusesBase):
                     )
                     print("DIS_DOWNLOAD_MODE is enabled")
                     print("Successful")
-                    exit(0)  # finish without errors
+                    sys.exit(0)  # finish without errors
                 raise
 
             print("Established a connection with the chip")
@@ -217,7 +228,7 @@ class EspEfuses(base_fields.EspEfusesBase):
                     )
                     print("ENABLE_SECURITY_DOWNLOAD is enabled")
                     print("Successful")
-                    exit(0)  # finish without errors
+                    sys.exit(0)  # finish without errors
             raise
 
     def set_efuse_timing(self):
@@ -228,17 +239,7 @@ class EspEfuses(base_fields.EspEfusesBase):
             raise esptool.FatalError(
                 "The eFuse supports only xtal=40M (xtal was %d)" % apb_freq
             )
-
-        self.update_reg(self.REGS.EFUSE_DAC_CONF_REG, self.REGS.EFUSE_DAC_NUM_M, 0xFF)
-        self.update_reg(
-            self.REGS.EFUSE_DAC_CONF_REG, self.REGS.EFUSE_DAC_CLK_DIV_M, 0x28
-        )
-        self.update_reg(
-            self.REGS.EFUSE_WR_TIM_CONF1_REG, self.REGS.EFUSE_PWR_ON_NUM_M, 0x3000
-        )
-        self.update_reg(
-            self.REGS.EFUSE_WR_TIM_CONF2_REG, self.REGS.EFUSE_PWR_OFF_NUM_M, 0x190
-        )
+        # keep default timing settings
 
     def get_coding_scheme_warnings(self, silent=False):
         """Check if the coding scheme has detected any errors."""
@@ -381,7 +382,7 @@ class EfuseMacField(EfuseField):
 class EfuseKeyPurposeField(EfuseField):
     KEY_PURPOSES = [
         ("USER",                         0,  None,       None,      "no_need_rd_protect"),   # User purposes (software-only use)
-        ("RESERVED",                     1,  None,       None,      "no_need_rd_protect"),   # Reserved
+        ("ECDSA_KEY",                    1,  None,       "Reverse", "need_rd_protect"),      # ECDSA key
         ("XTS_AES_256_KEY_1",            2,  None,       "Reverse", "need_rd_protect"),      # XTS_AES_256_KEY_1 (flash/PSRAM encryption)
         ("XTS_AES_256_KEY_2",            3,  None,       "Reverse", "need_rd_protect"),      # XTS_AES_256_KEY_2 (flash/PSRAM encryption)
         ("XTS_AES_128_KEY",              4,  None,       "Reverse", "need_rd_protect"),      # XTS_AES_128_KEY (flash/PSRAM encryption)
@@ -392,6 +393,8 @@ class EfuseKeyPurposeField(EfuseField):
         ("SECURE_BOOT_DIGEST0",          9,  "DIGEST",   None,      "no_need_rd_protect"),   # SECURE_BOOT_DIGEST0 (Secure Boot key digest)
         ("SECURE_BOOT_DIGEST1",          10, "DIGEST",   None,      "no_need_rd_protect"),   # SECURE_BOOT_DIGEST1 (Secure Boot key digest)
         ("SECURE_BOOT_DIGEST2",          11, "DIGEST",   None,      "no_need_rd_protect"),   # SECURE_BOOT_DIGEST2 (Secure Boot key digest)
+        ("KM_INIT_KEY",                  12, None,       None,      "need_rd_protect"),      # init key that is used for the generation of AES/ECDSA key
+        ("XTS_AES_256_KEY",              -1, "VIRTUAL",  None,      "no_need_rd_protect"),   # Virtual purpose splits to XTS_AES_256_KEY_1 and XTS_AES_256_KEY_2
     ]
 # fmt: on
     KEY_PURPOSES_NAME = [name[0] for name in KEY_PURPOSES]
@@ -427,6 +430,11 @@ class EfuseKeyPurposeField(EfuseField):
             if p[1] == self.get_raw(from_read):
                 return p[0]
         return "FORBIDDEN_STATE"
+
+    def get_name(self, raw_val):
+        for key in self.KEY_PURPOSES:
+            if key[1] == raw_val:
+                return key[0]
 
     def save(self, new_value):
         raw_val = int(self.check_format(str(new_value)))

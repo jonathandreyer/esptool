@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2022 Fredrik Ahlberg, Angus Gratton,
+# SPDX-FileCopyrightText: 2024 Fredrik Ahlberg, Angus Gratton,
 # Espressif Systems (Shanghai) CO LTD, other contributors as noted.
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
@@ -12,8 +12,6 @@ from ..util import FatalError, NotImplementedInROMError
 class ESP32C6ROM(ESP32C3ROM):
     CHIP_NAME = "ESP32-C6"
     IMAGE_CHIP_ID = 13
-
-    FPGA_SLOW_BOOT = False
 
     IROM_MAP_START = 0x42000000
     IROM_MAP_END = 0x42800000
@@ -74,6 +72,7 @@ class ESP32C6ROM(ESP32C3ROM):
 
     DR_REG_LP_WDT_BASE = 0x600B1C00
     RTC_CNTL_WDTCONFIG0_REG = DR_REG_LP_WDT_BASE + 0x0  # LP_WDT_RWDT_CONFIG0_REG
+    RTC_CNTL_WDTCONFIG1_REG = DR_REG_LP_WDT_BASE + 0x0004  # LP_WDT_RWDT_CONFIG1_REG
     RTC_CNTL_WDTWPROTECT_REG = DR_REG_LP_WDT_BASE + 0x0018  # LP_WDT_RWDT_WPROTECT_REG
 
     RTC_CNTL_SWD_CONF_REG = DR_REG_LP_WDT_BASE + 0x001C  # LP_WDT_SWD_CONFIG_REG
@@ -100,6 +99,8 @@ class ESP32C6ROM(ESP32C3ROM):
         [0x50000000, 0x50004000, "RTC_DRAM"],
         [0x600FE000, 0x60100000, "MEM_INTERNAL2"],
     ]
+
+    UF2_FAMILY_ID = 0x540DDF62
 
     def get_pkg_version(self):
         num_word = 3
@@ -161,8 +162,10 @@ class ESP32C6ROM(ESP32C3ROM):
         )
 
     def get_key_block_purpose(self, key_block):
-        if key_block < 0 or key_block > 5:
-            raise FatalError("Valid key block numbers must be in range 0-5")
+        if key_block < 0 or key_block > self.EFUSE_MAX_KEY:
+            raise FatalError(
+                f"Valid key block numbers must be in range 0-{self.EFUSE_MAX_KEY}"
+            )
 
         reg, shift = [
             (self.EFUSE_PURPOSE_KEY0_REG, self.EFUSE_PURPOSE_KEY0_SHIFT),
@@ -176,9 +179,20 @@ class ESP32C6ROM(ESP32C3ROM):
 
     def is_flash_encryption_key_valid(self):
         # Need to see an AES-128 key
-        purposes = [self.get_key_block_purpose(b) for b in range(6)]
+        purposes = [
+            self.get_key_block_purpose(b) for b in range(self.EFUSE_MAX_KEY + 1)
+        ]
 
         return any(p == self.PURPOSE_VAL_XTS_AES128_KEY for p in purposes)
+
+    def check_spi_connection(self, spi_connection):
+        if not set(spi_connection).issubset(set(range(0, 31))):
+            raise FatalError("SPI Pin numbers must be in the range 0-30.")
+        if any([v for v in spi_connection if v in [12, 13]]):
+            print(
+                "WARNING: GPIO pins 12 and 13 are used by USB-Serial/JTAG, "
+                "consider using other pins for SPI flash connection."
+            )
 
 
 class ESP32C6StubLoader(ESP32C6ROM):

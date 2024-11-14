@@ -1,4 +1,4 @@
-{IDF_TARGET_BOOTLOADER_OFFSET:default="0x0", esp32="0x1000", esp32s2="0x1000"}
+{IDF_TARGET_BOOTLOADER_OFFSET:default="0x0", esp32="0x1000", esp32s2="0x1000", esp32p4="0x2000"}
 
 .. _advanced-commands:
 
@@ -48,7 +48,7 @@ The ``dump_mem`` command will dump a region from the chip's memory space to a fi
 Load a Binary to RAM: load_ram
 ------------------------------
 
-The ``load_ram`` command allows the loading of an executable binary image (created with the ``elf2image`` or ``make_image`` commands) directly into RAM, and then immediately executes the program contained within it.
+The ``load_ram`` command allows the loading of an executable binary image (created with the ``elf2image`` or ``make_image`` commands) directly into RAM, and then immediately executes the program contained within it. Command also supports ``.hex`` file created by ``merge_bin`` command from supported ``.bin`` files.
 
 ::
 
@@ -94,7 +94,7 @@ The ``--bytes`` argument determines how many status register bytes are read.
 
 .. note::
 
-    Not all flash chips support all of these comands. Consult the specific flash chip datasheet for details.
+    Not all flash chips support all of these commands. Consult the specific flash chip datasheet for details.
 
 .. _write-flash-status:
 
@@ -119,6 +119,19 @@ A second option ``--non-volatile`` can be used in order to send a ``WREN`` (06h)
 .. warning::
 
     Setting status bits (particularly non-volatile ones) can have permanent side effects for some flash chips, so check carefully before using this command to set any bits!
+
+.. _read-flash-sfdp:
+
+Read Serial Flash Discoverable Parameters (SFDP): read_flash_sfdp
+-----------------------------------------------------------------
+
+The Serial Flash Discoverable Parameters (SFDP) store essential vendor-specific configuration data of the flash memory chip. These parameters help identify and interact with different flash devices. Usage:
+
+::
+
+    esptool.py read_flash_sfdp 16 4
+
+This will read 4 bytes from SFDP address 16.
 
 .. only:: esp8266
 

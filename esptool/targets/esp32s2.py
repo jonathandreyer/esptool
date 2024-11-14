@@ -1,22 +1,19 @@
-# SPDX-FileCopyrightText: 2014-2023 Fredrik Ahlberg, Angus Gratton,
+# SPDX-FileCopyrightText: 2014-2024 Fredrik Ahlberg, Angus Gratton,
 # Espressif Systems (Shanghai) CO LTD, other contributors as noted.
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-import os
 import struct
+from typing import Dict
 
 from .esp32 import ESP32ROM
 from ..loader import ESPLoader
-from ..reset import HardReset
 from ..util import FatalError, NotImplementedInROMError
 
 
 class ESP32S2ROM(ESP32ROM):
     CHIP_NAME = "ESP32-S2"
     IMAGE_CHIP_ID = 2
-
-    FPGA_SLOW_BOOT = False
 
     IROM_MAP_START = 0x40080000
     IROM_MAP_END = 0x40B80000
@@ -32,6 +29,8 @@ class ESP32S2ROM(ESP32ROM):
     SPI_MOSI_DLEN_OFFS = 0x24
     SPI_MISO_DLEN_OFFS = 0x28
     SPI_W0_OFFS = 0x58
+
+    SPI_ADDR_REG_MSB = False
 
     MAC_EFUSE_REG = 0x3F41A044  # ESP32-S2 has special block for MAC efuses
 
@@ -82,9 +81,16 @@ class ESP32S2ROM(ESP32ROM):
     USB_RAM_BLOCK = 0x800  # Max block size USB-OTG is used
 
     GPIO_STRAP_REG = 0x3F404038
-    GPIO_STRAP_SPI_BOOT_MASK = 0x8  # Not download mode
+    GPIO_STRAP_SPI_BOOT_MASK = 1 << 3  # Not download mode
+    GPIO_STRAP_VDDSPI_MASK = 1 << 4
     RTC_CNTL_OPTION1_REG = 0x3F408128
     RTC_CNTL_FORCE_DOWNLOAD_BOOT_MASK = 0x1  # Is download mode forced over USB?
+
+    RTCCNTL_BASE_REG = 0x3F408000
+    RTC_CNTL_WDTCONFIG0_REG = RTCCNTL_BASE_REG + 0x0094
+    RTC_CNTL_WDTCONFIG1_REG = RTCCNTL_BASE_REG + 0x0098
+    RTC_CNTL_WDTWPROTECT_REG = RTCCNTL_BASE_REG + 0x00AC
+    RTC_CNTL_WDT_WKEY = 0x50D83AA1
 
     MEMORY_MAP = [
         [0x00000000, 0x00010000, "PADDING"],
@@ -100,6 +106,29 @@ class ESP32S2ROM(ESP32ROM):
         [0x40080000, 0x40800000, "IROM"],
         [0x50000000, 0x50002000, "RTC_DATA"],
     ]
+
+    EFUSE_VDD_SPI_REG = EFUSE_BASE + 0x34
+    VDD_SPI_XPD = 1 << 4
+    VDD_SPI_TIEH = 1 << 5
+    VDD_SPI_FORCE = 1 << 6
+
+    UF2_FAMILY_ID = 0xBFDD4EEE
+
+    EFUSE_MAX_KEY = 5
+    KEY_PURPOSES: Dict[int, str] = {
+        0: "USER/EMPTY",
+        1: "RESERVED",
+        2: "XTS_AES_256_KEY_1",
+        3: "XTS_AES_256_KEY_2",
+        4: "XTS_AES_128_KEY",
+        5: "HMAC_DOWN_ALL",
+        6: "HMAC_DOWN_JTAG",
+        7: "HMAC_DOWN_DIGITAL_SIGNATURE",
+        8: "HMAC_UP",
+        9: "SECURE_BOOT_DIGEST0",
+        10: "SECURE_BOOT_DIGEST1",
+        11: "SECURE_BOOT_DIGEST2",
+    }
 
     def get_pkg_version(self):
         num_word = 4
@@ -183,6 +212,9 @@ class ESP32S2ROM(ESP32ROM):
         # ESP32-S2 XTAL is fixed to 40MHz
         return 40
 
+    def _get_rtc_cntl_flash_voltage(self):
+        return None  # not supported on ESP32-S2
+
     def override_vddsdio(self, new_voltage):
         raise NotImplementedInROMError(
             "VDD_SDIO overrides are not supported for ESP32-S2"
@@ -215,8 +247,10 @@ class ESP32S2ROM(ESP32ROM):
         )
 
     def get_key_block_purpose(self, key_block):
-        if key_block < 0 or key_block > 5:
-            raise FatalError("Valid key block numbers must be in range 0-5")
+        if key_block < 0 or key_block > self.EFUSE_MAX_KEY:
+            raise FatalError(
+                f"Valid key block numbers must be in range 0-{self.EFUSE_MAX_KEY}"
+            )
 
         reg, shift = [
             (self.EFUSE_PURPOSE_KEY0_REG, self.EFUSE_PURPOSE_KEY0_SHIFT),
@@ -230,7 +264,9 @@ class ESP32S2ROM(ESP32ROM):
 
     def is_flash_encryption_key_valid(self):
         # Need to see either an AES-128 key or two AES-256 keys
-        purposes = [self.get_key_block_purpose(b) for b in range(6)]
+        purposes = [
+            self.get_key_block_purpose(b) for b in range(self.EFUSE_MAX_KEY + 1)
+        ]
 
         if any(p == self.PURPOSE_VAL_XTS_AES128_KEY for p in purposes):
             return True
@@ -251,41 +287,41 @@ class ESP32S2ROM(ESP32ROM):
         if self.uses_usb_otg():
             self.ESP_RAM_BLOCK = self.USB_RAM_BLOCK
 
-    def _check_if_can_reset(self):
-        """
-        Check the strapping register to see if we can reset out of download mode.
-        """
-        if os.getenv("ESPTOOL_TESTING") is not None:
-            print("ESPTOOL_TESTING is set, ignoring strapping mode check")
-            # Esptool tests over USB-OTG run with GPIO0 strapped low,
-            # don't complain in this case.
-            return
-        strap_reg = self.read_reg(self.GPIO_STRAP_REG)
-        force_dl_reg = self.read_reg(self.RTC_CNTL_OPTION1_REG)
-        if (
-            strap_reg & self.GPIO_STRAP_SPI_BOOT_MASK == 0
-            and force_dl_reg & self.RTC_CNTL_FORCE_DOWNLOAD_BOOT_MASK == 0
-        ):
-            print(
-                "WARNING: {} chip was placed into download mode using GPIO0.\n"
-                "esptool.py can not exit the download mode over USB. "
-                "To run the app, reset the chip manually.\n"
-                "To suppress this note, set --after option to 'no_reset'.".format(
-                    self.get_chip_description()
-                )
-            )
-            raise SystemExit(1)
+    def rtc_wdt_reset(self):
+        print("Hard resetting with RTC WDT...")
+        self.write_reg(self.RTC_CNTL_WDTWPROTECT_REG, self.RTC_CNTL_WDT_WKEY)  # unlock
+        self.write_reg(self.RTC_CNTL_WDTCONFIG1_REG, 5000)  # set WDT timeout
+        self.write_reg(
+            self.RTC_CNTL_WDTCONFIG0_REG, (1 << 31) | (5 << 28) | (1 << 8) | 2
+        )  # enable WDT
+        self.write_reg(self.RTC_CNTL_WDTWPROTECT_REG, 0)  # lock
 
     def hard_reset(self):
         uses_usb_otg = self.uses_usb_otg()
         if uses_usb_otg:
-            self._check_if_can_reset()
+            # Check the strapping register to see if we can perform RTC WDT reset
+            strap_reg = self.read_reg(self.GPIO_STRAP_REG)
+            force_dl_reg = self.read_reg(self.RTC_CNTL_OPTION1_REG)
+            if (
+                strap_reg & self.GPIO_STRAP_SPI_BOOT_MASK == 0  # GPIO0 low
+                and force_dl_reg & self.RTC_CNTL_FORCE_DOWNLOAD_BOOT_MASK == 0
+            ):
+                self.rtc_wdt_reset()
+                return
 
-        print("Hard resetting via RTS pin...")
-        HardReset(self._port, uses_usb_otg)()
+        ESPLoader.hard_reset(self, uses_usb_otg)
 
     def change_baud(self, baud):
         ESPLoader.change_baud(self, baud)
+
+    def check_spi_connection(self, spi_connection):
+        if not set(spi_connection).issubset(set(range(0, 22)) | set(range(26, 47))):
+            raise FatalError("SPI Pin numbers must be in the range 0-21, or 26-46.")
+        if any([v for v in spi_connection if v in [19, 20]]):
+            print(
+                "WARNING: GPIO pins 19 and 20 are used by USB-OTG, "
+                "consider using other pins for SPI flash connection."
+            )
 
 
 class ESP32S2StubLoader(ESP32S2ROM):

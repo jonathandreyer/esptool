@@ -1,9 +1,10 @@
-# SPDX-FileCopyrightText: 2014-2022 Fredrik Ahlberg, Angus Gratton,
+# SPDX-FileCopyrightText: 2014-2024 Fredrik Ahlberg, Angus Gratton,
 # Espressif Systems (Shanghai) CO LTD, other contributors as noted.
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import struct
+from typing import Dict
 
 from .esp32 import ESP32ROM
 from ..loader import ESPLoader
@@ -13,8 +14,6 @@ from ..util import FatalError, NotImplementedInROMError
 class ESP32C3ROM(ESP32ROM):
     CHIP_NAME = "ESP32-C3"
     IMAGE_CHIP_ID = 5
-
-    FPGA_SLOW_BOOT = False
 
     IROM_MAP_START = 0x42000000
     IROM_MAP_END = 0x42800000
@@ -29,10 +28,12 @@ class ESP32C3ROM(ESP32ROM):
     SPI_MISO_DLEN_OFFS = 0x28
     SPI_W0_OFFS = 0x58
 
+    SPI_ADDR_REG_MSB = False
+
     BOOTLOADER_FLASH_OFFSET = 0x0
 
-    # Magic value for ESP32C3 eco 1+2 and ESP32C3 eco3 respectivly
-    CHIP_DETECT_MAGIC_VALUE = [0x6921506F, 0x1B31506F]
+    # Magic values for ESP32-C3 eco 1+2, eco 3, eco 6, and eco 7 respectively
+    CHIP_DETECT_MAGIC_VALUE = [0x6921506F, 0x1B31506F, 0x4881606F, 0x4361606F]
 
     UART_DATE_REG_ADDR = 0x60000000 + 0x7C
 
@@ -82,6 +83,7 @@ class ESP32C3ROM(ESP32ROM):
     RTC_CNTL_SWD_WKEY = 0x8F1D312A
 
     RTC_CNTL_WDTCONFIG0_REG = RTCCNTL_BASE_REG + 0x0090
+    RTC_CNTL_WDTCONFIG1_REG = RTCCNTL_BASE_REG + 0x0094
     RTC_CNTL_WDTWPROTECT_REG = RTCCNTL_BASE_REG + 0x00A8
     RTC_CNTL_WDT_WKEY = 0x50D83AA1
 
@@ -98,6 +100,22 @@ class ESP32C3ROM(ESP32ROM):
         [0x50000000, 0x50002000, "RTC_DRAM"],
         [0x600FE000, 0x60100000, "MEM_INTERNAL2"],
     ]
+
+    UF2_FAMILY_ID = 0xD42BA06C
+
+    EFUSE_MAX_KEY = 5
+    KEY_PURPOSES: Dict[int, str] = {
+        0: "USER/EMPTY",
+        1: "RESERVED",
+        4: "XTS_AES_128_KEY",
+        5: "HMAC_DOWN_ALL",
+        6: "HMAC_DOWN_JTAG",
+        7: "HMAC_DOWN_DIGITAL_SIGNATURE",
+        8: "HMAC_UP",
+        9: "SECURE_BOOT_DIGEST0",
+        10: "SECURE_BOOT_DIGEST1",
+        11: "SECURE_BOOT_DIGEST2",
+    }
 
     def get_pkg_version(self):
         num_word = 3
@@ -152,6 +170,9 @@ class ESP32C3ROM(ESP32ROM):
         # ESP32C3 XTAL is fixed to 40MHz
         return 40
 
+    def get_flash_voltage(self):
+        pass  # not supported on ESP32-C3
+
     def override_vddsdio(self, new_voltage):
         raise NotImplementedInROMError(
             "VDD_SDIO overrides are not supported for ESP32-C3"
@@ -176,8 +197,10 @@ class ESP32C3ROM(ESP32ROM):
         )
 
     def get_key_block_purpose(self, key_block):
-        if key_block < 0 or key_block > 5:
-            raise FatalError("Valid key block numbers must be in range 0-5")
+        if key_block < 0 or key_block > self.EFUSE_MAX_KEY:
+            raise FatalError(
+                f"Valid key block numbers must be in range 0-{self.EFUSE_MAX_KEY}"
+            )
 
         reg, shift = [
             (self.EFUSE_PURPOSE_KEY0_REG, self.EFUSE_PURPOSE_KEY0_SHIFT),
@@ -191,7 +214,9 @@ class ESP32C3ROM(ESP32ROM):
 
     def is_flash_encryption_key_valid(self):
         # Need to see an AES-128 key
-        purposes = [self.get_key_block_purpose(b) for b in range(6)]
+        purposes = [
+            self.get_key_block_purpose(b) for b in range(self.EFUSE_MAX_KEY + 1)
+        ]
 
         return any(p == self.PURPOSE_VAL_XTS_AES128_KEY for p in purposes)
 
@@ -227,6 +252,30 @@ class ESP32C3ROM(ESP32ROM):
     def _post_connect(self):
         if not self.sync_stub_detected:  # Don't run if stub is reused
             self.disable_watchdogs()
+
+    def hard_reset(self):
+        if self.uses_usb_jtag_serial():
+            self.rtc_wdt_reset()
+        else:
+            ESPLoader.hard_reset(self)
+
+    def rtc_wdt_reset(self):
+        print("Hard resetting with RTC WDT...")
+        self.write_reg(self.RTC_CNTL_WDTWPROTECT_REG, self.RTC_CNTL_WDT_WKEY)  # unlock
+        self.write_reg(self.RTC_CNTL_WDTCONFIG1_REG, 5000)  # set WDT timeout
+        self.write_reg(
+            self.RTC_CNTL_WDTCONFIG0_REG, (1 << 31) | (5 << 28) | (1 << 8) | 2
+        )  # enable WDT
+        self.write_reg(self.RTC_CNTL_WDTWPROTECT_REG, 0)  # lock
+
+    def check_spi_connection(self, spi_connection):
+        if not set(spi_connection).issubset(set(range(0, 22))):
+            raise FatalError("SPI Pin numbers must be in the range 0-21.")
+        if any([v for v in spi_connection if v in [18, 19]]):
+            print(
+                "WARNING: GPIO pins 18 and 19 are used by USB-Serial/JTAG, "
+                "consider using other pins for SPI flash connection."
+            )
 
 
 class ESP32C3StubLoader(ESP32C3ROM):
