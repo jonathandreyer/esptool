@@ -776,6 +776,10 @@ class EfuseFieldBase(EfuseProtectBase):
         self.bitarray.set(0)
         self.update(self.parent.blocks[self.block].bitarray)
 
+    @property
+    def all_names(self) -> list[str]:
+        return [self.name] + [name for name in self.alt_names if name != ""]
+
     def is_field_calculated(self):
         return self.word is None or self.pos is None
 

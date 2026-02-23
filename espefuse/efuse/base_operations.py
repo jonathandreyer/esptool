@@ -264,8 +264,7 @@ class BaseCommands:
             required=True,
             nargs=-1,
             type=EfuseValuePairType(
-                [e.name for e in efuses]
-                + [name for e in efuses for name in e.alt_names if name != ""],
+                [name for e in efuses for name in e.all_names],
                 self.efuses,
             ),
         )
@@ -281,7 +280,19 @@ class BaseCommands:
             help="Disable readback for the selected eFuse with the specified name.",
             short_help="Disable readback for the eFuse.",
         )
-        @click.argument("efuse_name", nargs=-1, required=True)
+        @click.argument(
+            "efuse_name",
+            nargs=-1,
+            required=True,
+            type=click.Choice(
+                [
+                    name
+                    for e in efuses
+                    if e.read_disable_bit is not None
+                    for name in e.all_names
+                ]
+            ),
+        )
         @click.pass_context
         def read_protect_efuse_cli(ctx, efuse_name):
             self.read_protect_efuse(efuse_name)
@@ -291,7 +302,19 @@ class BaseCommands:
             help="Disable writing to the eFuse with the specified name.",
             short_help="Disable writing to the eFuse.",
         )
-        @click.argument("efuse_name", nargs=-1, required=True)
+        @click.argument(
+            "efuse_name",
+            nargs=-1,
+            required=True,
+            type=click.Choice(
+                [
+                    name
+                    for e in efuses
+                    if e.write_disable_bit is not None
+                    for name in e.all_names
+                ]
+            ),
+        )
         def write_protect_efuse_cli(efuse_name):
             """Disable writing to the eFuse with the specified name."""
             self.write_protect_efuse(efuse_name)
@@ -331,7 +354,11 @@ class BaseCommands:
             self.burn_block_data(block, datafile, offset)
 
         @cli.command("burn-bit")
-        @click.argument("block", required=True)
+        @click.argument(
+            "block",
+            required=True,
+            type=click.Choice(self.efuses.BURN_BLOCK_DATA_NAMES),
+        )
         @click.argument(
             "bit_number",
             nargs=-1,
