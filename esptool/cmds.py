@@ -1309,6 +1309,36 @@ def chip_id(esp: ESPLoader) -> None:
         read_mac(esp)
 
 
+def _verify_flash_connection(esp: ESPLoader) -> bool:
+    """
+    Verify flash chip connection using a two-step fallback:
+    SFDP register -> flash_id.
+    Skipped in secure download mode.
+
+    Note: SFDP check targets SPI NOR flash only.
+    It may not work with octal (OPI) flash or NAND flash (not supported by esptool).
+    Verification is heuristic: bus pull-ups/pull-downs or other devices on the
+    bus can affect results and lead to false positives or false negatives.
+    """
+    if esp.secure_download_mode:
+        return True
+
+    # Step 1: SFDP (Serial Flash Discoverable Parameters) - JEDEC standard for SPI NOR.
+    # Not applicable to NAND; OPI flash may use different commands/opcodes.
+    SFDP_SIGNATURE = 0x50444653  # "SFDP" in little-endian hex (0x53, 0x46, 0x44, 0x50)
+    sfdp = esp.read_spiflash_sfdp(0, 32)
+    if sfdp == SFDP_SIGNATURE:
+        return True
+
+    # Step 2: Fallback to flash_id check.
+    BAD_FLASH_IDS = (0xFFFFFF, 0x000000, 0xFFFF3F)
+    fid = esp.flash_id(cache=False)
+    if fid not in BAD_FLASH_IDS:
+        return True
+
+    return False
+
+
 def attach_flash(
     esp: ESPLoader,
     spi_connection: (tuple[int, int, int, int, int] | str) | None = None,
@@ -1419,25 +1449,22 @@ def attach_flash(
         except FatalError as e:
             esp.trace(f"Unable to perform XMC flash chip startup sequence ({e}).")
 
-    # Check flash chip connection
-    if not esp.secure_download_mode:
-        try:
-            flash_id = esp.flash_id()
-            if flash_id in (0xFFFFFF, 0x000000, 0xFFFF3F):
-                log.warning(
-                    "Failed to communicate with the flash chip, "
-                    "read/write operations will fail. "
-                    "Try checking the chip connections or removing "
-                    "any other hardware connected to IOs."
+    # Check flash chip connection (SFDP -> flash_id)
+    try:
+        if not _verify_flash_connection(esp):
+            log.warning(
+                "Failed to communicate with the flash chip, "
+                "read/write operations will fail. "
+                "Try checking the chip connections or removing "
+                "any other hardware connected to IOs."
+            )
+            if spi_connection is not None:
+                log.note(
+                    "Some GPIO pins might be used by other peripherals, try using "
+                    "another combination of pins for SPI flash connection."
                 )
-                if spi_connection is not None:
-                    log.note(
-                        "Some GPIO pins might be used by other peripherals, try using "
-                        "another combination of pins for SPI flash connection."
-                    )
-
-        except FatalError as e:
-            raise FatalError(f"Unable to verify flash chip connection ({e}).")
+    except FatalError as e:
+        raise FatalError(f"Unable to verify flash chip connection ({e}).")
 
     if not esp.secure_download_mode:
         try:
