@@ -39,6 +39,7 @@ pytestmark = pytest.mark.linux_host_test
 
 # Link command line options --port, --chip, --baud, --with-trace, and --preload-port
 from conftest import (
+    IMAGES_FIXTURES_DIR,
     arg_baud,
     arg_chip,
     arg_port,
@@ -252,7 +253,7 @@ class EsptoolTestCase:
             preload_cmd = base_cmd + [
                 "--no-stub",
                 "load-ram",
-                f"{TEST_DIR}/images/ram_helloworld/helloworld-{arg_chip}.bin",
+                f"{IMAGES_FIXTURES_DIR}/ram_helloworld/helloworld-{arg_chip}.bin",
             ]
             print("\nPreloading dummy binary to disable RTC watchdog...")
             run_esptool_process(preload_cmd)

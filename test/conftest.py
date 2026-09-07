@@ -1,6 +1,14 @@
 import os
+from pathlib import Path
 
 import pytest
+
+TEST_DIR = Path(__file__).resolve().parent
+# Committed fixture directories (size/fill blobs under images/ are materialized
+# by bin_builder at pytest start — see materialize_bin_fixtures below).
+IMAGES_FIXTURES_DIR = TEST_DIR / "images"
+SECURE_FIXTURES_DIR = TEST_DIR / "secure_images"
+ELF2IMAGE_FIXTURES_DIR = TEST_DIR / "elf2image"
 
 
 def pytest_addoption(parser):
@@ -41,6 +49,11 @@ def pytest_configure(config):
     # test_espefuse.py only
     global arg_reset_port
     arg_reset_port = config.getoption("--reset-port")
+
+    # Trivial size/fill blobs (not firmware goldens) — see bin_builder.py
+    from bin_builder import materialize_bin_fixtures
+
+    materialize_bin_fixtures(IMAGES_FIXTURES_DIR)
 
     # register custom markers
     config.addinivalue_line(

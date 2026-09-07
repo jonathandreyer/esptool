@@ -9,6 +9,7 @@ import sys
 import tempfile
 
 import pytest
+from conftest import SECURE_FIXTURES_DIR
 
 pytestmark = [pytest.mark.host_test, pytest.mark.linux_host_test]
 
@@ -16,7 +17,7 @@ pkcs11 = pytest.importorskip("pkcs11")
 
 import espsecure
 
-TEST_DIR = os.path.abspath(os.path.dirname(__file__))
+SECURE_IMAGES_DIR = str(SECURE_FIXTURES_DIR)
 
 TOKEN_PIN = "1234"
 TOKEN_PIN_SO = "123456"
@@ -33,7 +34,7 @@ class EspSecureHSMTestCase:
             f.close()
 
     def _open(self, image_file):
-        f = open(os.path.join(TEST_DIR, "secure_images", image_file), "rb")
+        f = open(os.path.join(SECURE_IMAGES_DIR, image_file), "rb")
         self.cleanup_files.append(f)
         return f
 
@@ -107,7 +108,7 @@ class EspSecureHSMTestCase:
         )
 
         # Generate HSM config file
-        configfile = os.path.join(TEST_DIR, "secure_images", filename)
+        configfile = os.path.join(SECURE_IMAGES_DIR, filename)
         config = configparser.ConfigParser()
 
         section = "hsm_config"
@@ -196,7 +197,7 @@ class EspSecureHSMTestCase:
         )
 
         # Generate HSM config file
-        configfile = os.path.join(TEST_DIR, "secure_images", filename)
+        configfile = os.path.join(SECURE_IMAGES_DIR, filename)
         config = configparser.ConfigParser()
 
         section = "hsm_config"
@@ -220,9 +221,7 @@ class TestSigning(EspSecureHSMTestCase):
         self.softhsm_setup_token("softhsm_v2.ini", "softhsm-test-token")
         with (
             tempfile.NamedTemporaryFile() as output_file,
-            open(
-                os.path.join(TEST_DIR, "secure_images", "softhsm_v2.ini")
-            ) as config_file,
+            open(os.path.join(SECURE_IMAGES_DIR, "softhsm_v2.ini")) as config_file,
         ):
             espsecure.sign_data(
                 version="2",
@@ -249,9 +248,7 @@ class TestSigning(EspSecureHSMTestCase):
         self.softhsm_setup_token("softhsm_v2_1.ini", "softhsm-test-token-1")
         with (
             tempfile.NamedTemporaryFile() as output_file1,
-            open(
-                os.path.join(TEST_DIR, "secure_images", "softhsm_v2_1.ini")
-            ) as config_file1,
+            open(os.path.join(SECURE_IMAGES_DIR, "softhsm_v2_1.ini")) as config_file1,
         ):
             espsecure.sign_data(
                 version="2",
@@ -269,7 +266,7 @@ class TestSigning(EspSecureHSMTestCase):
             with (
                 tempfile.NamedTemporaryFile() as output_file2,
                 open(
-                    os.path.join(TEST_DIR, "secure_images", "softhsm_v2_2.ini")
+                    os.path.join(SECURE_IMAGES_DIR, "softhsm_v2_2.ini")
                 ) as config_file2,
             ):
                 espsecure.sign_data(
@@ -288,7 +285,7 @@ class TestSigning(EspSecureHSMTestCase):
                 with (
                     tempfile.NamedTemporaryFile() as output_file3,
                     open(
-                        os.path.join(TEST_DIR, "secure_images", "softhsm_v2_3.ini"),
+                        os.path.join(SECURE_IMAGES_DIR, "softhsm_v2_3.ini"),
                     ) as config_file3,
                 ):
                     espsecure.sign_data(
@@ -339,9 +336,7 @@ class TestSDCSigning(EspSecureHSMTestCase):
         self.softhsm_setup_ecdsa_token("softhsm_v2_sdc.ini", "softhsm-sdc-token")
         with (
             tempfile.NamedTemporaryFile() as output_file,
-            open(
-                os.path.join(TEST_DIR, "secure_images", "softhsm_v2_sdc.ini")
-            ) as config_file,
+            open(os.path.join(SECURE_IMAGES_DIR, "softhsm_v2_sdc.ini")) as config_file,
         ):
             from espsecure.esp_sdc import generate_sdc_certificate
 
@@ -363,9 +358,7 @@ class TestSDCSigning(EspSecureHSMTestCase):
         self.softhsm_setup_ecdsa_token("softhsm_v2_sdc.ini", "softhsm-sdc-token")
         with (
             tempfile.NamedTemporaryFile() as digest_file,
-            open(
-                os.path.join(TEST_DIR, "secure_images", "softhsm_v2_sdc.ini")
-            ) as config_file,
+            open(os.path.join(SECURE_IMAGES_DIR, "softhsm_v2_sdc.ini")) as config_file,
         ):
             from espsecure.esp_sdc import digest_sdc_public_key
 
