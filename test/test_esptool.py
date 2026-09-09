@@ -1638,8 +1638,13 @@ class TestMemoryOperations(EsptoolTestCase):
         Return a RAM address suitable for memory read/write tests.
         ESP32-P4 has different RAM ranges. Address 0x4FF90000 is just
         inside the range and unused.
+        ESP32-S31 uses 0x2F070000 near the end of HP SRAM, below the ROM stack.
         """
-        return 0x4FF90000 if arg_chip == "esp32p4" else 0x400C0000
+        if arg_chip == "esp32p4":
+            return 0x4FF90000
+        if arg_chip == "esp32s31":
+            return 0x2F070000
+        return 0x400C0000
 
     def test_memory_write(self, test_address):
         output = self.run_esptool(f"write-mem {test_address:#X} 0xabad1dea 0x0000ffff")
