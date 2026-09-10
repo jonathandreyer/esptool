@@ -344,9 +344,13 @@ class TestReadCommands(EfuseTestCase):
             self.espefuse_py("burn-efuse BLK_VERSION_MAJOR 1")
         elif arg_chip in ["esp32c2", "esp32s2", "esp32c6"]:
             self.espefuse_py("burn-efuse BLK_VERSION_MINOR 1")
-        elif arg_chip in ["esp32h2"]:
+        elif arg_chip in ["esp32h2", "esp32s31"]:
             self.espefuse_py("burn-efuse BLK_VERSION_MINOR 2")
-        self.espefuse_py("adc-info")
+        output = self.espefuse_py("adc-info")
+        if arg_chip == "esp32s31":
+            assert "Block version: 2" in output
+            assert "ADC1_DIFF_K" in output
+            assert "ADC2_N_B" in output
 
     def test_check_error(self):
         self.espefuse_py("check-error -h")
